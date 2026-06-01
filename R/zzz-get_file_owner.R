@@ -3,22 +3,20 @@
 #' This internal helper attempts to determine the file-system owner for each
 #' supplied path and returns a simplified "username" string.
 #'
-#' On **Windows** it calls the `dir /Q` command via `shell()` and parses the
-#' owner from the output line corresponding to each file. On **Unix-like
-#' systems** (including typical Posit Workbench setups) it uses
+#' On **Windows** it calls `dir /Q` once per unique *directory* (not once per
+#' file) and parses the owner from the batch output. This is substantially
+#' faster than per-file calls on network drives: ~4,400 images spread across
+#' ~20 subfolders requires ~20 shell calls instead of ~4,400.
+#'
+#' On **Unix-like systems** (including typical Posit Workbench setups) it uses
 #' [fs::file_info()] and its `user` column.
 #'
-#' The raw owner string returned by the operating system is often of the form
+#' The raw owner string returned by the OS is often of the form
 #' `"DOMAIN\\user.name"` or `"MACHINE\\user"`. This function post-processes
 #' that string and returns only the final component after the last backslash
 #' (e.g. `"user.name"`), so that downstream code can work with a clean
 #' username. If no owner can be determined, `NA_character_` is returned for
 #' that path.
-#'
-#' Paths that do not exist result in `NA` for that element.
-#'
-#' This function is intended for internal use (e.g. by
-#' \code{extract_image_metadata()}) and is not exported.
 #'
 #' @param path Character vector of file paths.
 #'
@@ -29,38 +27,21 @@
 #'
 #' @keywords internal
 #'
-#' @examples
-#' \dontrun{
-#'   # Single path
-#'   .get_file_owner("C:/path/to/file.jpg")
-#'
-#'   # Vector of paths
-#'   files <- c("C:/path/to/file1.jpg", "C:/path/to/file2.jpg")
-#'   owners <- .get_file_owner(files)
-#' }
-#'
 #' @importFrom fs file_info
 .get_file_owner <- function(path) {
   path <- as.character(path)
-  n <- length(path)
+  n    <- length(path)
   if (!n) return(character(0))
-  
-  # Helper to post-process raw owner string:
-  # - if it contains backslashes (e.g. "DOMAIN\\user.name") keep only the
-  #   part after the last backslash
-  # - otherwise return as-is
+
+  # Post-process raw owner string: strip leading DOMAIN\ or MACHINE\ component
   clean_owner <- function(owner_raw) {
-    if (is.na(owner_raw) || !nzchar(owner_raw)) {
-      return(NA_character_)
-    }
-    # Split on backslash and take the last component
+    if (is.na(owner_raw) || !nzchar(trimws(owner_raw))) return(NA_character_)
     parts <- strsplit(owner_raw, "\\\\")[[1]]
-    owner <- parts[length(parts)]
-    owner <- trimws(owner)
+    owner <- trimws(parts[length(parts)])
     if (!nzchar(owner)) NA_character_ else owner
   }
-  
-  # Non-Windows branch: use fs::file_info()$user
+
+  # ---- Non-Windows branch: use fs::file_info()$user ----------------------
   if (Sys.info()[["sysname"]] != "Windows") {
     if (!requireNamespace("fs", quietly = TRUE)) {
       warning(
@@ -69,81 +50,84 @@
       )
       return(rep(NA_character_, n))
     }
-    
-    res <- rep(NA_character_, n)
-    
+    res      <- rep(NA_character_, n)
     existing <- file.exists(path)
     if (any(existing)) {
-      info <- fs::file_info(path[existing])
+      info      <- fs::file_info(path[existing])
       raw_users <- as.character(info$user)
       res[existing] <- vapply(raw_users, clean_owner, FUN.VALUE = character(1))
     }
-    
     return(res)
   }
-  
-  # Windows branch: use `dir /Q` via cmd.exe
-  res <- rep(NA_character_, n)
-  
-  for (i in seq_len(n)) {
-    p <- path[i]
-    if (is.na(p) || !nzchar(p) || !file.exists(p)) {
-      res[i] <- NA_character_
-      next
-    }
-    
-    # Normalise with backslashes so cmd.exe doesn't treat "/" as switches
-    p_norm <- normalizePath(p, winslash = "\\", mustWork = FALSE)
-    
-    cmd <- paste0('dir /Q "', p_norm, '"')
-    
+
+  # ---- Windows branch: batch dir /Q by directory -------------------------
+  # Running dir /Q on a *directory* returns ownership for every file in one
+  # shell call.  Grouping by unique parent directory reduces the number of
+  # shell() calls from one-per-file to one-per-directory — a ~200x speedup
+  # for a typical 4,400-image run across ~20 subfolders on a network drive.
+
+  res        <- rep(NA_character_, n)
+  exists_vec <- file.exists(path)
+  if (!any(exists_vec)) return(res)
+
+  # Normalise to backslashes so cmd.exe sees valid paths
+  path_norm   <- normalizePath(path, winslash = "\\", mustWork = FALSE)
+  unique_dirs <- unique(dirname(path_norm[exists_vec]))
+
+  # Regex to parse a file-entry line from `dir /Q` output.
+  # Example line:
+  #   "29/10/2025  02:40 PM         2,476,242 PFR\mike.currie   filename.JPG"
+  # Works for both 12-hour (AM/PM) and 24-hour locale formats.
+  file_line_re <- paste0(
+    "^\\s*\\d{1,2}/\\d{1,2}/\\d{4}",   # date  (DD/MM/YYYY or MM/DD/YYYY)
+    "\\s+\\d{1,2}:\\d{2}",              # time  (H:MM or HH:MM)
+    "(?:\\s*[AP]M)?",                   # optional AM/PM (12-hour locales)
+    "\\s+[\\d,]+",                      # file size with optional commas
+    "\\s+(\\S+)",                       # owner  — captured group 1, no spaces
+    "\\s+(.+?)\\s*$"                    # filename — captured group 2, rest of line
+  )
+
+  # owner_lookup: named character vector, names = normalised full path
+  owner_lookup <- character(0)
+
+  for (d in unique_dirs) {
+    cmd <- paste0('dir /Q "', d, '"')
+
     dir_output <- tryCatch(
       shell(cmd, intern = TRUE),
-      warning = function(w) {
-        # Non-zero exit status: still try to grab whatever output exists
-        suppressWarnings(
-          tryCatch(shell(cmd, intern = TRUE), error = function(e) character(0))
-        )
-      },
-      error = function(e) {
-        character(0)
-      }
+      warning = function(w) suppressWarnings(
+        tryCatch(shell(cmd, intern = TRUE), error = function(e) character(0))
+      ),
+      error = function(e) character(0)
     )
-    
-    if (!length(dir_output)) {
-      # No usable output
-      res[i] <- NA_character_
-      next
+    if (!length(dir_output)) next
+
+    for (line in dir_output) {
+      # Skip directory entries and non-file lines
+      if (grepl("<DIR>", line, fixed = TRUE)) next
+
+      m <- regexec(file_line_re, line, perl = TRUE)[[1L]]
+      if (m[1L] == -1L) next
+
+      ml        <- attr(m, "match.length")
+      owner_raw <- substr(line, m[2L], m[2L] + ml[2L] - 1L)
+      filename  <- trimws(substr(line, m[3L], m[3L] + ml[3L] - 1L))
+
+      if (!nzchar(filename)) next
+
+      key              <- paste0(d, "\\", filename)
+      owner_lookup[key] <- clean_owner(owner_raw)
     }
-    
-    bn <- basename(p_norm)
-    
-    # Find the line containing the basename
-    line <- dir_output[grepl(bn, dir_output, fixed = TRUE)]
-    if (!length(line)) {
-      res[i] <- NA_character_
-      next
-    }
-    line <- line[1]
-    
-    # Example structure (spaces may vary):
-    # 01/02/2026  11:05 AM               4 DOMAIN\\User   filename.jpg
-    #
-    # Owner is the token immediately before the basename.
-    # We'll capture that token via a regex.
-    esc_bn <- gsub("([][+.^$(){}|-])", "\\\\\\1", bn)  # escape metacharacters
-    pattern <- paste0(".*\\s([^ ]+)\\s+", esc_bn, ".*$")
-    owner_raw <- sub(pattern, "\\1", line)
-    owner_raw <- trimws(owner_raw)
-    
-    # If the substitution did nothing, we likely failed to match
-    if (!nzchar(owner_raw) || identical(owner_raw, line)) {
-      res[i] <- NA_character_
-      next
-    }
-    
-    res[i] <- clean_owner(owner_raw)
   }
-  
+
+  # Map owners back to the original input order
+  for (i in seq_len(n)) {
+    if (!exists_vec[i]) next
+    key <- path_norm[i]
+    if (!is.na(key) && nzchar(key) && key %in% names(owner_lookup)) {
+      res[i] <- owner_lookup[[key]]
+    }
+  }
+
   res
 }
