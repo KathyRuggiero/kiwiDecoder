@@ -39,26 +39,27 @@
 #'
 #' @importFrom writexl write_xlsx
 #' @export
+#' @keywords internal
 .can_write_xlsx <- function(path) {
-  
+
   if (!is.character(path) || length(path) != 1L) {
     stop("`path` must be a character scalar.")
   }
-  
+
   dir_path <- dirname(path)
   if (!dir.exists(dir_path)) {
     stop("Directory does not exist: ", dir_path)
   }
-  
+
   # Case 1: file does not yet exist -> test we can create it
   if (!file.exists(path)) {
-    
+
     tmp <- tempfile(pattern = ".__writecheck__", tmpdir = dir_path)
-    
+
     on.exit({
       if (file.exists(tmp)) unlink(tmp)
     }, add = TRUE)
-    
+
     # Write a tiny workbook to a temp file
     tryCatch(
       writexl::write_xlsx(
@@ -72,38 +73,38 @@
         )
       }
     )
-    
+
     # Attempt to rename temp -> target WITHOUT emitting a warning
     rename_ok <- suppressWarnings(file.rename(tmp, path))
-    
+
     if (!rename_ok) {
       stop(
         "Cannot create Excel file at path (likely permissions issue):\n",
         path
       )
     }
-    
+
     # Clean up the created test file
     unlink(path)
-    
+
   } else {
-    
+
     # Case 2: file exists -> test we can rename it away and back
     backup <- tempfile(pattern = ".__backup__", tmpdir = dir_path)
-    
+
     # Try renaming the existing file to backup (fails if locked/open)
     moved_out <- suppressWarnings(file.rename(path, backup))
-    
+
     if (!moved_out) {
       stop(
         "Cannot write Excel file: likely open or locked.\n",
         "Target: ", path
       )
     }
-    
+
     # Try to restore the original file name
     moved_back <- suppressWarnings(file.rename(backup, path))
-    
+
     if (!moved_back) {
       stop(
         "Writeability check moved file to backup but could not restore it.\n",
@@ -111,6 +112,6 @@
       )
     }
   }
-  
+
   invisible(TRUE)
 }

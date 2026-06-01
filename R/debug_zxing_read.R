@@ -43,7 +43,7 @@
 #' No candidate symbols or decode errors returned by ZXing for image file:
 #' Debug ZXing Barcode Detection for a Single Image
 #'
-#' See vignette section 6.2.1 for examples and interpretation.
+#' See vignette section 6.2.1 for examples and interpretation.}
 #'
 #' @param path Character path to an image file.
 #' @return Invisibly returns `NULL`, printing diagnostics to the console.
@@ -52,7 +52,7 @@ debug_zxing_read <- function(path) {
   path <- normalizePath(path, winslash = "/", mustWork = TRUE)
   folder <- dirname(path)
   fname  <- basename(path)
-  
+
   Image <- tryCatch(
     reticulate::import("PIL.Image", convert = FALSE),
     error = function(e) {
@@ -71,7 +71,7 @@ debug_zxing_read <- function(path) {
     message("Python modules missing; install pillow + zxingcpp.")
     return(invisible(NULL))
   }
-  
+
   # Open image and normalise MPO → RGB if needed
   img_py <- tryCatch(
     {
@@ -91,7 +91,7 @@ debug_zxing_read <- function(path) {
     cat("Image could not be opened: ", fname, "\n\n", sep = "")
     return(invisible(NULL))
   }
-  
+
   # Call ZXing with return_errors = TRUE
   res_py <- tryCatch(
     zxing$read_barcodes(
@@ -105,7 +105,7 @@ debug_zxing_read <- function(path) {
       NULL
     }
   )
-  
+
   # Case A: no candidate symbols at all
   if (is.null(res_py) || reticulate::py_len(res_py) == 0L) {
     cat("\nFile folder:", folder, "\n\n")
@@ -116,7 +116,7 @@ debug_zxing_read <- function(path) {
     )
     cat(
       "Try the following functions for (possibly) more information:\n",
-      "  - decode_full_then_center_crop(path)\n",
+      "  - detect_codes_all_zxing(path)\n",
       "  - decode_hierarchical_zxing(path)\n\n",
       "If these do not work, visually inspect the image — the symbol(s) may be\n",
       "too small, cropped, low‑contrast, blurred, rippled, or otherwise unreadable.\n",
@@ -124,26 +124,26 @@ debug_zxing_read <- function(path) {
     )
     return(invisible(NULL))
   }
-  
+
   # Case B: one or more symbol-like regions
   res <- reticulate::py_to_r(res_py)
   n   <- length(res)
-  
+
   cat("ZXing returned", n, "result object(s).\n")
-  
+
   for (i in seq_along(res)) {
     r <- res[[i]]
     fmt   <- tryCatch(as.character(r$format), error = function(e) NA)
     text  <- tryCatch(as.character(r$text),   error = function(e) NA)
     error <- tryCatch(as.character(r$error),  error = function(e) NA)
     valid <- tryCatch(as.character(r$valid),  error = function(e) NA)
-    
+
     cat("\n--- Result", i, "---\n")
     cat(" format :", fmt,  "\n")
     cat(" text   :", text, "\n")
     cat(" error  :", error, "\n")
     cat(" valid  :", valid, "\n")
   }
-  
+
   invisible(NULL)
 }

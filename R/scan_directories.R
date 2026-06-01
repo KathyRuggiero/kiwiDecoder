@@ -13,7 +13,10 @@
 #' * Detection and logging of paths that are too long for Excel.
 #'
 #' @param root Character scalar. Root directory for scanning.
-#' @param extensions Character vector of allowed image file extensions (case-insensitive). Defaults to \code{c("jpg", "jpeg", "png")}.
+#' @param extensions Character vector of allowed image file extensions (case-insensitive).
+#'   Defaults to \code{c("jpg", "jpeg", "png", "heic")}. HEIC support requires the
+#'   \code{pillow-heif} Python package installed in the active conda environment
+#'   (run \code{reticulate::py_install("pillow-heif", pip = TRUE)} once to add it).
 #' @param prefixes Character vector of regex patterns matched against filename stems (without extensions). Use `NULL` or `character(0)` to disable stem filtering.
 #' @param checkpoint_file File path to RDS checkpoint. Default `"scan_checkpoint.rds"`.
 #' @param resume Logical; if `TRUE`, resumes from the checkpoint file.
@@ -23,19 +26,24 @@
 #'
 #' @return Invisibly returns a list containing:
 #' * `dirs_scanned` – character vector of directories fully scanned.
-#' * `long_path_warnings` – data frame of directories where Excel paths exceeded `max_path_length`.
+#' * `long_path_warnings` – data frame of directories where CSV paths exceeded `max_path_length`.
+#'
+#' @param checkpoint_interval Integer. Save the RDS checkpoint every this many
+#'   directories (and always at the end). Higher values reduce network I/O on
+#'   slow drives. Default `10`.
 #'
 #' @export
 scan_directories <- function(
     root,
-    extensions      = c("jpg", "jpeg", "png"),
-    prefixes        = c("^PMC_[0-9]{5}$", "^DSC_[0-9]{4}$",
-                        "^IMG_[0-9]{4}$", "^P[0-9]{7}$"),
-    checkpoint_file = "scan_checkpoint.rds",
-    resume          = TRUE,
-    dry_run         = FALSE,
-    log_file        = file.path(root, "scan_log.csv"),
-    max_path_length = 255
+    extensions          = c("jpg", "jpeg", "png", "heic"),
+    prefixes            = c("^PMC_[0-9]{5}$", "^DSC_[0-9]{4}$",
+                            "^IMG_[0-9]{4}$", "^P[0-9]{7}$"),
+    checkpoint_file     = "scan_checkpoint.rds",
+    resume              = TRUE,
+    dry_run             = FALSE,
+    log_file            = file.path(root, "scan_log.csv"),
+    max_path_length     = 255,
+    checkpoint_interval = 10L
 ) {
   if (!dir.exists(root)) stop("Root directory does not exist: ", root)
   
@@ -49,10 +57,10 @@ scan_directories <- function(
                           dirs_scanned)
   
   long_path_warnings <- data.frame(
-    dir        = character(0),
-    subdir     = character(0),
-    excel_path = character(0),
-    n_chars    = numeric(0),
+    dir      = character(0),
+    subdir   = character(0),
+    csv_path = character(0),
+    n_chars  = numeric(0),
     stringsAsFactors = FALSE
   )
   
@@ -63,16 +71,16 @@ scan_directories <- function(
     current_dir <- dirs_to_scan[i]
     subdir <- basename(current_dir)
     
-    # Determine Excel path
-    excel_path <- file.path(current_dir, paste0(subdir, ".xlsx"))
-    n_chars <- nchar(excel_path)
-    
+    # Determine CSV path
+    csv_path <- file.path(current_dir, paste0(subdir, ".csv"))
+    n_chars  <- nchar(csv_path)
+
     if (n_chars > max_path_length) {
       warning_row <- data.frame(
-        dir        = current_dir,
-        subdir     = subdir,
-        excel_path = excel_path,
-        n_chars    = n_chars,
+        dir      = current_dir,
+        subdir   = subdir,
+        csv_path = csv_path,
+        n_chars  = n_chars,
         stringsAsFactors = FALSE
       )
       long_path_warnings <- rbind(long_path_warnings, warning_row)
@@ -84,24 +92,26 @@ scan_directories <- function(
       )
       next
     }
-    
+
     # Write directory index unless dry_run
     if (!dry_run) {
       tryCatch({
         write_directory_index(
-          dir      = current_dir,
+          dir        = current_dir,
           extensions = extensions,
           prefixes   = prefixes,
-          excel_path = excel_path
+          csv_path   = csv_path
         )
       }, error = function(e) {
-        warning("Failed to write Excel for ", current_dir, ": ", e$message)
+        warning("Failed to write CSV index for ", current_dir, ": ", e$message)
       })
     }
-    
-    # Update checkpoint
+
+    # Update checkpoint every checkpoint_interval directories (and at end)
     dirs_scanned <- c(dirs_scanned, current_dir)
-    saveRDS(list(dirs_scanned = dirs_scanned), checkpoint_file)
+    if (i %% checkpoint_interval == 0L || i == length(dirs_to_scan)) {
+      saveRDS(list(dirs_scanned = dirs_scanned), checkpoint_file)
+    }
     
     # Update progress bar
     utils::setTxtProgressBar(pb, i)

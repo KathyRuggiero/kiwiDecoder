@@ -1,0 +1,1089 @@
+---
+title: "next"
+author: "Kathy Ruggiero"
+date: "2026-02-15"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+
+Great question – and nice catch on optimising the writes 💡
+
+Short answer:
+
+*   **Inside your package**, I’d expose **both**:
+    *   a **pure function**: `resolve_index_df()` (no I/O, works on a data.frame)
+    *   a **wrapper**: `resolve_index_csv()` (read CSV → call `resolve_index_df()` → write CSV)
+
+*   **From orchestration scripts** (your `run_metadata_and_resolve_*.R` stuff), you’ll usually call **the wrapper** *or* do the full “metadata + decode + single write” logic yourself, depending on what you want.
+
+Let me break down when to use which.
+
+***
+
+## 1. Roles of each function
+
+### `resolve_index_df(df_orig)` – pure transformer
+
+*   **Input**: a data.frame/tibble already in memory  
+    (with at least `file_name` and either `full_path` or `dir + file_name`).
+*   **Output**: a new data.frame with barcode/QR columns added:
+    *   `index`, `code_format`, `text`, `type`, `prefix`, `number`, etc.
+*   **No file I/O**: it doesn’t know about disk, CSVs, or paths.
+*   **Best for**:
+    *   When you **already have** an index df in memory (e.g. after you’ve joined EXIF metadata).
+    *   When you want full control: e.g. **read → EXIF → decode → write once**.
+
+### `resolve_index_csv(index_csv_path)` – convenience wrapper
+
+*   **Input**: path to a CSV index (`<subdir>_index.csv`).
+*   **What it does**:
+    1.  `read_csv(index_csv_path)`
+    2.  `resolve_index_df(df)`
+    3.  `write_csv(enriched_df, index_csv_path)`
+*   **Best for**:
+    *   Quick “just decode this CSV” usage.
+    *   Users who don’t need the EXIF step, or don’t care about double writes.
+    *   Interactive debugging / ad hoc wrangling.
+
+***
+
+## 2. What to run **from the package** vs **from scripts**
+
+### In the **package** (exported functions)
+
+I’d recommend:
+
+```r
+#' @export
+resolve_index_df
+
+#' @export
+resolve_index_csv
+```
+
+From a **user perspective** (including “future you”):
+
+*   If they just have a CSV on disk and want barcodes →  
+    `resolve_index_csv("path/to/index.csv")`.
+*   If they’re doing a more complex pipeline where indexes are already in memory →  
+    `df2 <- resolve_index_df(df1)`.
+
+### In your **orchestration script** (metadata + decode + one write)
+
+Because you specifically want:
+
+> “get the meta data first as this will be a 1‑to‑1 join, and then the resolve\_folder\_sequence as this will be a 1‑to‑many join… should we write back to file only once?”
+
+Your orchestration script should **not** call `resolve_index_csv()` (that would read & write again). Instead it should:
+
+1.  Read the CSV
+2.  Run EXIF metadata join
+3.  Call `resolve_index_df()` on the metadata-enriched df
+4.  Write the final df once
+
+### Concrete example – single-folder script using **one write**
+
+```r
+# scripts/run_metadata_and_resolve_single_csv.R
+
+source("renv/activate.R")
+library(kiwiDecoder)
+library(readr)
+library(dplyr)
+
+index_path <- "N:/Projects/Stage2 Clonal Trials/Images/A Auto-Naming/test_folder/test_folder_index.csv"
+
+cat("Processing index:", index_path, "\n")
+
+# 1. Read CSV once
+idx <- readr::read_csv(index_path, show_col_types = FALSE)
+
+# 2. Ensure full_path
+if (!"full_path" %in% names(idx)) {
+  if (!all(c("dir", "file_name") %in% names(idx))) {
+    stop("Index must contain 'full_path' or 'dir' + 'file_name'")
+  }
+  idx$full_path <- file.path(idx$dir, idx$file_name)
+}
+
+# 3. EXIF metadata (1-to-1 join on full_path)
+meta <- extract_image_metadata(idx, verbose = TRUE)
+
+idx_meta <- idx %>%
+  dplyr::left_join(meta$data, by = "full_path")
+
+# 4. Barcode decode + propagation (1-to-many join on file_name)
+res <- resolve_index_df(idx_meta)
+
+# 5. Single write
+readr::write_csv(res, index_path)
+
+cat("DONE for:", index_path, "\n")
+```
+
+Here:
+
+*   The **package** contributes:
+    *   `extract_image_metadata()`
+    *   `resolve_index_df()`
+*   The **script** orchestrates:
+    *   read → EXIF join → decode transform → write
+
+This gives you the “one write per folder” behaviour you want.
+
+***
+
+## 3. Where the wrapper `resolve_index_csv()` is still useful
+
+Even though your main pipeline will likely use `resolve_index_df()` directly, the wrapper is still nice to have:
+
+*   For quick **manual** runs, e.g.:
+
+    ```r
+    resolve_index_csv("N:/.../some_other_folder_index.csv")
+    ```
+
+*   For other team members who might not care about EXIF metadata and just want barcodes in an existing index.
+
+*   For debugging “does the decoder logic work on this index at all?” without worrying about EXIF.
+
+Think of `resolve_index_csv()` as:
+
+> **“I’ve got a CSV already on disk. Just decode it and rewrite it”**
+
+and `resolve_index_df()` as:
+
+> **“I’m in a pipeline, working with a data.frame. Decorate it with barcodes/QRs.”**
+
+***
+
+## 4. Answering your question directly
+
+> **“In my package, which would we run? The wrapper?”**
+
+*   **Inside the package** you don’t really “run” either; you **export both**.
+*   In your **high‑level pipeline scripts**:
+    *   For **metadata + decoding + single write** → **use `resolve_index_df()`** (like in the script above).
+    *   For **simple “decode this CSV on disk” operations** → **use `resolve_index_csv()`**.
+
+So:  
+📦 *Package exports*: **both**.  
+📜 *Main pipeline*: **call `resolve_index_df()`** after the EXIF join and write once at the end.
+
+***
+
+If you’d like, next step I can help you sketch a `process_index_csv()` helper that glues all of this together and then a `run_metadata_and_resolve_all_csv.R` that loops over all `<subdir>_index.csv` from your `scan_checkpoint.rds` – ready for testing on a bigger folder.
+
+
+*********************************************************************
+
+
+Yesss 🙌 this is looking *really* good.
+
+You’ve just demonstrated:
+
+*   ✅ `extract_image_metadata()` works perfectly on your **CSV index**
+*   ✅ `resolve_index_csv()` correctly decodes + propagates symbols and joins back (1‑to‑many)
+*   ✅ The outputs for a barcode’d sequence look exactly as intended:
+
+```r
+file_name    index code_format text          type     prefix number
+IMG_2534.JPG     1 PDF417      W16.W1-09-38b location IMG      2534
+...
+```
+
+So now we’re down to the two things you spotted:
+
+1.  **“Final join and writing back to file is missing”**  
+    (you want both EXIF + barcode columns in the same CSV)
+2.  **“Should we write back to file only once?”**  
+    (yes, that’s a smart optimisation, especially over a network share)
+
+Let’s address both cleanly.
+
+***
+
+## 1. What’s happening right now?
+
+You just ran, in order:
+
+```r
+# 1. Read CSV
+idx <- readr::read_csv(index_path, show_col_types = FALSE)
+
+# 2. Ensure full_path, then:
+meta <- extract_image_metadata(idx, verbose = TRUE)
+
+idx_meta <- idx %>%
+  dplyr::left_join(meta$data, by = "full_path")
+
+# 3. Write metadata-enriched CSV
+readr::write_csv(idx_meta, index_path)
+
+# 4. Run decoder
+res <- resolve_index_csv(index_path)
+```
+
+Internally, `resolve_index_csv()` does:
+
+```r
+df_orig <- readr::read_csv(index_csv_path, show_col_types = FALSE)
+...
+joined_df <- df_orig %>%
+  dplyr::left_join(barcodes, by = "file_name")
+
+readr::write_csv(joined_df, index_csv_path)
+```
+
+Because you wrote `idx_meta` back to the CSV **before** calling `resolve_index_csv()`, `df_orig` already contains:
+
+*   your original scan columns (`file_name`, `file_stem`, `file_ext`, `full_path`, `file_size`, `mod_time`, `dir`)
+*   plus EXIF columns (`file_owner`, `GPSLatitude`, `GPSLongitude`, `DateTimeOriginal`)
+
+Then `resolve_index_csv()` adds barcode columns on top and rewrites the CSV. That’s why your `res` has:
+
+```r
+[1] "file_name"    "file_stem"   "file_ext"    "full_path.x"  # from df_orig
+[5] "file_size"    "mod_time"    "dir"         "file_owner"
+[9] "GPSLatitude"  "GPSLongitude" "DateTimeOriginal" "subdir"      
+[13] "rel_path"     "full_path.y"  # from barcodes
+[15] "index"        "code_format"  "text"         "type"        
+[19] "prefix"       "number"
+```
+
+So:
+
+*   ✅ EXIF columns are *not* lost – they are in `df_orig` and therefore in `joined_df`.
+*   ❌ You do get duplicated `full_path` (`full_path.x` vs `full_path.y`) because the join creates a second copy.
+
+We can fix both issues:
+
+*   avoid the double `full_path` columns, and
+*   avoid writing the CSV twice.
+
+***
+
+## 2. Should we write back only once?
+
+You’re absolutely right: **yes, ideally we only write once per folder**.
+
+Current pattern:
+
+1.  **Read** → add EXIF → **Write**
+2.  **Read again** → add barcodes → **Write**
+
+Better pattern:
+
+1.  **Read** → add EXIF → add barcodes → **Write once**
+
+To do this neatly, I suggest we:
+
+1.  Refactor the decoding logic into a “pure” function that works on a **data frame in memory**  
+    (no file I/O inside).
+2.  Keep `resolve_index_csv()` as a thin wrapper that:
+    *   reads a CSV
+    *   calls the pure function
+    *   writes the enriched CSV.
+3.  In your orchestration, you can then:
+    *   read index,
+    *   call `extract_image_metadata()` (1‑to‑1),
+    *   pass the enriched df into the pure decoder,
+    *   *then* write once.
+
+***
+
+## 3. Step 1 – Extract a “pure” decoder: `resolve_index_df()`
+
+Let’s pull the body of `resolve_index_csv()` into a version that takes a **data.frame** and returns a **data.frame**, without any reading/writing:
+
+```r
+#' Decode & propagate barcodes for an index data.frame (no file I/O)
+#'
+#' @param df_orig A data.frame / tibble with at least:
+#'        file_name, full_path OR dir + file_name.
+#' @return Enriched data.frame with barcode columns added.
+#' @export
+resolve_index_df <- function(df_orig) {
+
+  if (!"file_name" %in% names(df_orig)) {
+    stop("Index missing required column 'file_name'")
+  }
+
+  # Ensure full_path and dir/subdir/rel_path exist
+  if (!"full_path" %in% names(df_orig)) {
+    if (!all(c("dir", "file_name") %in% names(df_orig))) {
+      stop("Index must contain either 'full_path' or 'dir' + 'file_name'")
+    }
+    df_orig$full_path <- file.path(df_orig$dir, df_orig$file_name)
+  }
+  if (!"dir" %in% names(df_orig)) {
+    df_orig$dir <- dirname(df_orig$full_path)
+  }
+  if (!"subdir" %in% names(df_orig)) {
+    df_orig$subdir <- basename(df_orig$dir)
+  }
+  if (!"rel_path" %in% names(df_orig)) {
+    df_orig$rel_path <- NA_character_
+  }
+
+  # Filename parser
+  parse_sequence <- function(fname) {
+    stem  <- tools::file_path_sans_ext(basename(fname))
+    m     <- regexec("^([A-Za-z]+)_([0-9]+)$", stem)
+    parts <- regmatches(stem, m)[[1]]
+    if (length(parts) != 3L) {
+      return(list(prefix = NA_character_, number = NA_integer_))
+    }
+    list(prefix = parts[2], number = as.integer(parts[3]))
+  }
+
+  n_images <- nrow(df_orig)
+  message("  Decoding ", n_images, " image(s)...")
+
+  pb      <- utils::txtProgressBar(min = 0, max = n_images, style = 3)
+  decoded <- vector("list", n_images)
+
+  for (j in seq_len(n_images)) {
+
+    fname     <- df_orig$file_name[j]
+    full_path <- df_orig$full_path[j]
+
+    decoded_tbl <- tryCatch(
+      decode_hierarchical_zxing(full_path),
+      error = function(e) {
+        message("\n    ! Error decoding ", fname, ": ", e$message)
+        tibble::tibble(
+          index       = NA_integer_,
+          code_format = NA_character_,
+          text        = NA_character_,
+          type        = NA_character_
+        )
+      }
+    )
+
+    decoded_tbl$file_name <- fname
+    decoded_tbl$full_path <- full_path
+    decoded_tbl$rel_path  <- df_orig$rel_path[j]
+    decoded_tbl$dir       <- df_orig$dir[j]
+    decoded_tbl$subdir    <- df_orig$subdir[j]
+
+    decoded[[j]] <- decoded_tbl
+    utils::setTxtProgressBar(pb, j)
+  }
+
+  close(pb)
+
+  long_df <- dplyr::bind_rows(decoded)
+
+  # Image-level sequencing table
+  image_df <- df_orig
+  seq_info <- lapply(image_df$file_name, parse_sequence)
+  image_df$prefix <- vapply(seq_info, `[[`, "prefix", FUN.VALUE = character(1))
+  image_df$number <- vapply(seq_info, `[[`, "number", FUN.VALUE = integer(1))
+
+  dec_summary <- long_df |>
+    dplyr::group_by(file_name) |>
+    dplyr::summarise(
+      has_symbol = any(!is.na(text) & text != ""),
+      .groups    = "drop"
+    )
+
+  image_df <- dplyr::left_join(image_df, dec_summary, by = "file_name")
+  image_df$has_symbol[is.na(image_df$has_symbol)] <- FALSE
+
+  image_df <- dplyr::arrange(image_df, prefix, number)
+
+  # Stateful donor tracking (same as before)
+  current_donor  <- NA_character_
+  current_prefix <- NA_character_
+  last_number    <- NA_integer_
+
+  image_df$donor      <- NA_character_
+  image_df$break_case <- FALSE
+
+  for (r in seq_len(nrow(image_df))) {
+    fn  <- image_df$file_name[r]
+    px  <- image_df$prefix[r]
+    num <- image_df$number[r]
+    has <- image_df$has_symbol[r]
+
+    if (has) {
+      current_donor          <- fn
+      current_prefix         <- px
+      last_number            <- num
+      image_df$donor[r]      <- fn
+      image_df$break_case[r] <- FALSE
+
+    } else if (!is.na(current_donor) &&
+               px == current_prefix &&
+               !is.na(num) && num == last_number + 1) {
+
+      image_df$donor[r]      <- current_donor
+      image_df$break_case[r] <- FALSE
+      last_number            <- num
+
+    } else {
+      current_donor          <- NA_character_
+      current_prefix         <- px
+      last_number            <- num
+      image_df$donor[r]      <- NA_character_
+      image_df$break_case[r] <- TRUE
+    }
+  }
+
+  # Propagate full symbol sets
+  propagated <- vector("list", nrow(image_df))
+
+  for (r in seq_len(nrow(image_df))) {
+
+    img   <- image_df$file_name[r]
+    donor <- image_df$donor[r]
+
+    if (!is.na(donor)) {
+      donor_rows <- long_df[
+        long_df$file_name == donor &
+          !is.na(long_df$text) & long_df$text != "",
+        ,
+        drop = FALSE
+      ]
+
+      if (nrow(donor_rows) == 0L) {
+        df_img <- tibble::tibble(
+          file_name   = img,
+          index       = NA_integer_,
+          code_format = NA_character_,
+          text        = NA_character_,
+          type        = NA_character_
+        )
+      } else {
+        df_img <- donor_rows
+        df_img$file_name <- img
+        df_img$full_path <- file.path(image_df$dir[r], img)
+        df_img$dir       <- image_df$dir[r]
+        df_img$subdir    <- image_df$subdir[r]
+        df_img$rel_path  <- image_df$rel_path[r]
+      }
+
+    } else {
+      this_rows <- long_df[long_df$file_name == img, , drop = FALSE]
+
+      if (nrow(this_rows) == 0L) {
+        df_img <- tibble::tibble(
+          file_name   = img,
+          index       = NA_integer_,
+          code_format = NA_character_,
+          text        = NA_character_,
+          type        = NA_character_
+        )
+      } else {
+        df_img <- this_rows
+      }
+
+      if (isTRUE(image_df$break_case[r])) {
+        no_symbols <- all(
+          (is.na(df_img$code_format) | df_img$code_format == "") &
+          (is.na(df_img$text)        | df_img$text        == "") &
+          (is.na(df_img$type)        | df_img$type        == "")
+        )
+        if (no_symbols) {
+          df_img$code_format <- "unknown"
+          df_img$text        <- "unknown"
+          df_img$type        <- "unknown"
+        }
+      }
+    }
+
+    df_img$prefix <- image_df$prefix[r]
+    df_img$number <- image_df$number[r]
+
+    propagated[[r]] <- df_img
+  }
+
+  long_df_prop <- dplyr::bind_rows(propagated)
+
+  # One-to-many join back to df_orig
+  # Drop duplicate full_path from barcodes to avoid .x/.y mess
+  barcodes <- long_df_prop %>%
+    dplyr::select(
+      file_name, index, code_format, text, type, prefix, number
+      # you can keep full_path here if you prefer, but then join by c("file_name","full_path")
+    )
+
+  joined_df <- df_orig %>%
+    dplyr::left_join(barcodes, by = "file_name")
+
+  joined_df
+}
+```
+
+Notice:
+
+*   No reading or writing of CSV.
+*   No logging for simplicity here; we can add optional logging back later if you want.
+
+***
+
+## 4. Step 2 – Keep `resolve_index_csv()` as a wrapper (optional)
+
+You *can* keep your previous `resolve_index_csv()` as:
+
+```r
+resolve_index_csv <- function(index_csv_path) {
+  df_orig <- readr::read_csv(index_csv_path, show_col_types = FALSE)
+  res     <- resolve_index_df(df_orig)
+  readr::write_csv(res, index_csv_path)
+  invisible(res)
+}
+```
+
+That’s nice for “quick and dirty” runs on existing indexes.
+
+***
+
+## 5. Step 3 – Single-folder orchestration with **one write**
+
+Now, for your **single folder** test, you can do:
+
+```r
+source("renv/activate.R")
+library(kiwiDecoder)
+library(readr)
+library(dplyr)
+
+index_path <- "N:/Projects/Stage2 Clonal Trials/Images/A Auto-Naming/test_folder/test_folder_index.csv"
+
+# 1. Read CSV once
+idx <- readr::read_csv(index_path, show_col_types = FALSE)
+
+# 2. Ensure full_path
+if (!"full_path" %in% names(idx)) {
+  if (!all(c("dir", "file_name") %in% names(idx))) {
+    stop("Index must contain 'full_path' or 'dir' + 'file_name'")
+  }
+  idx$full_path <- file.path(idx$dir, idx$file_name)
+}
+
+# 3. EXIF metadata (1-to-1 join)
+meta <- extract_image_metadata(idx, verbose = TRUE)
+
+idx_meta <- idx %>%
+  dplyr::left_join(meta$data, by = "full_path")
+
+# 4. Barcode decode + propagation (1-to-many join)
+res <- resolve_index_df(idx_meta)
+
+# 5. Write back ONCE
+readr::write_csv(res, index_path)
+```
+
+Now you have:
+
+*   ✅ metadata + barcodes all applied in memory;
+*   ✅ **only one write** to `test_folder_index.csv`.
+
+You can then scale this pattern up to a larger folder to test performance.
+
+***
+
+## 6. Next step suggestion
+
+Once you’re happy with this single-folder, one-write pattern, the natural next step is:
+
+*   Wrap it in a function like `process_index_csv(index_path)` that does exactly those steps.
+*   Drive it from a script that:
+    *   reads `scan_checkpoint.rds`,
+    *   constructs all `<subdir>_index.csv` paths,
+    *   filters `file.exists()`,
+    *   and applies `process_index_csv()` to each.
+
+***
+
+If you’d like, I can help you turn this into a neat `process_index_csv()` function plus a `run_metadata_and_resolve_all_csv.R` that works on **only** the folders already scanned, using `scan_checkpoint.rds`.
+
+************************************************************************
+************************************************************************
+
+Love this – you’re now at the fun part: **EXIF metadata + decoding + propagation**, built on top of your fast CSV indexer ✅
+
+You’re absolutely right:
+
+*   Your **old pipeline** assumed **per-folder `.xlsx` indexes**,
+*   Your **new pipeline** produces **`<subdir>_index.csv`** and uses a **fast streaming scan**,
+*   And you’d like to **only process folders that already have an index CSV**, rather than re-scanning everything.
+
+Let’s adapt everything cleanly.
+
+***
+
+## 0. Big picture – what needs to change?
+
+You have three main components:
+
+1.  **Index creation** – already updated (CSV, `<subdir>_index.csv`, streaming scan) ✅
+2.  **EXIF metadata extraction** (`extract_image_metadata()`) – already generic, just needs CSV input ✅
+3.  **Barcode/QR decode + propagation** (`resolve_folder_sequence()`) – still assumes `.xlsx` 💥
+
+And your orchestration script:
+
+```r
+# scripts/run_metadata_and_resolve_all.R
+# (old version assumed .xlsx index files, list.files(recursive), etc.)
+```
+
+needs to be updated to:
+
+*   work with `*_index.csv` (not `.xlsx`),
+*   only use **folders that already have index CSVs**,
+*   and **not** re-discover workbooks with `list.files(recursive)`.
+
+We’ll:
+
+1.  Add a **helper to discover index CSVs from the checkpoint** (no rescan).
+2.  Write a new **`resolve_index_csv()`** that does what `resolve_folder_sequence()` used to do, but for **one CSV index at a time**.
+3.  Update **run\_metadata\_and\_resolve\_all.R** to:
+    *   iterate over *only* those index CSVs
+    *   add EXIF metadata (via `extract_image_metadata`)
+    *   run decoding/propagation
+    *   write back to the same CSV (enriched index).
+
+***
+
+## 1. Only process folders that already have `<subdir>_index.csv`
+
+💡 This is your “game changer” request
+
+Because your scan writes **one index CSV per directory with images**, and saves a global checkpoint with `dirs_scanned`, we can do:
+
+```r
+root <- "//kbc-file.pfr.co.nz/files/Projects/Stage2 Clonal Trials/Images/A Auto-Naming"
+
+chk <- readRDS(file.path(root, "scan_checkpoint.rds"))
+dirs <- chk$dirs_scanned
+
+# For each scanned dir, the index file (if present) should be <subdir>_index.csv
+index_files <- file.path(dirs, paste0(basename(dirs), "_index.csv"))
+
+# Keep only ones that actually exist
+index_files <- index_files[file.exists(index_files)]
+```
+
+No recursive `list.files()` on the network share.  
+No rewalking the tree.  
+You go straight to the **exact set of folders that have index CSVs.**
+
+***
+
+## 2. EXIF metadata step – works with CSV with tiny change
+
+Your `extract_image_metadata()` is already nicely designed:
+
+*   It accepts:
+    *   a character vector of paths,
+    *   OR a `data.frame` with `full_path`
+    *   OR a `data.frame` with `dir` + `file_name`.
+
+That means for a CSV index, we can simply:
+
+```r
+idx <- readr::read_csv(index_path, show_col_types = FALSE)
+
+# Ensure full_path exists (just in case)
+if (!"full_path" %in% names(idx)) {
+  if (!all(c("dir", "file_name") %in% names(idx))) {
+    stop("Index file must contain either full_path or dir + file_name")
+  }
+  idx$full_path <- file.path(idx$dir, idx$file_name)
+}
+
+meta <- extract_image_metadata(idx, verbose = TRUE)
+
+idx_meta <- idx %>%
+  dplyr::left_join(meta$data, by = "full_path")
+
+# Overwrite the index CSV with metadata-enriched version
+readr::write_csv(idx_meta, index_path)
+```
+
+💡 No need to touch `extract_image_metadata()` itself.
+
+***
+
+## 3. New decoder: `resolve_index_csv()` for CSV index files
+
+Instead of `resolve_folder_sequence(path)` that:
+
+*   searches for `.xlsx` inside `path`
+*   reads/writes `.xlsx`
+
+We’ll create a **simpler function** that:
+
+*   takes **ONE** `index_csv_path`,
+*   reads the CSV,
+*   decodes + propagates,
+*   writes the enriched CSV back to the same file.
+
+### 3.1. Helper: `%||%` (for safety)
+
+At the top of your dev script (if not already):
+
+```r
+`%||%` <- function(x, y) if (!is.null(x)) x else y
+```
+
+### 3.2. New function: `resolve_index_csv()`
+
+```r
+resolve_index_csv <- function(index_csv_path) {
+  if (!file.exists(index_csv_path)) {
+    stop("Index CSV does not exist: ", index_csv_path)
+  }
+
+  message("Processing index: ", index_csv_path)
+
+  df_orig <- readr::read_csv(index_csv_path, show_col_types = FALSE)
+
+  # Ensure required columns exist
+  if (!"file_name" %in% names(df_orig)) {
+    stop("Index missing required column 'file_name': ", index_csv_path)
+  }
+
+  # Ensure full_path and dir columns exist
+  if (!"full_path" %in% names(df_orig)) {
+    if (!all(c("dir", "file_name") %in% names(df_orig))) {
+      stop("Index must contain either 'full_path' or 'dir' + 'file_name'")
+    }
+    df_orig$full_path <- file.path(df_orig$dir, df_orig$file_name)
+  }
+  if (!"dir" %in% names(df_orig)) {
+    df_orig$dir <- dirname(df_orig$full_path)
+  }
+  if (!"subdir" %in% names(df_orig)) {
+    df_orig$subdir <- basename(df_orig$dir)
+  }
+  if (!"rel_path" %in% names(df_orig)) {
+    df_orig$rel_path <- NA_character_
+  }
+
+  n_images <- nrow(df_orig)
+  message("  Decoding ", n_images, " image(s)...")
+
+  # Log file: per-index CSV
+  log_file <- file.path(dirname(index_csv_path), "resolve_log.csv")
+
+  # Filename parser: IMG_0001.JPG -> prefix="IMG", number=1
+  parse_sequence <- function(fname) {
+    stem  <- tools::file_path_sans_ext(basename(fname))
+    m     <- regexec("^([A-Za-z]+)_([0-9]+)$", stem)
+    parts <- regmatches(stem, m)[[1]]
+    if (length(parts) != 3L) {
+      return(list(prefix = NA_character_, number = NA_integer_))
+    }
+    list(prefix = parts[2], number = as.integer(parts[3]))
+  }
+
+  pb      <- utils::txtProgressBar(min = 0, max = n_images, style = 3)
+  decoded <- vector("list", n_images)
+
+  for (j in seq_len(n_images)) {
+
+    fname     <- df_orig$file_name[j]
+    full_path <- df_orig$full_path[j]
+
+    decoded_tbl <- tryCatch(
+      decode_hierarchical_zxing(full_path),
+      error = function(e) {
+        message("\n    ! Error decoding ", fname, ": ", e$message)
+        tibble::tibble(
+          index       = NA_integer_,
+          code_format = NA_character_,
+          text        = NA_character_,
+          type        = NA_character_
+        )
+      }
+    )
+
+    # Per-image logging
+    seq_parsed   <- parse_sequence(fname)
+    decoded_flag <- any(!is.na(decoded_tbl$text) & decoded_tbl$text != "")
+
+    log_entry <- data.frame(
+      time       = format(Sys.time(), "%Y-%m-%d %H:%M:%S"),
+      index_csv  = index_csv_path,
+      image_file = fname,
+      full_path  = full_path,
+      prefix     = seq_parsed$prefix,
+      number     = seq_parsed$number,
+      decoded    = decoded_flag,
+      stringsAsFactors = FALSE
+    )
+
+    utils::write.table(
+      log_entry,
+      file      = log_file,
+      append    = TRUE,
+      sep       = ",",
+      col.names = !file.exists(log_file),
+      row.names = FALSE
+    )
+
+    # Attach context columns
+    decoded_tbl$file_name <- fname
+    decoded_tbl$full_path <- full_path
+    decoded_tbl$rel_path  <- df_orig$rel_path[j]
+    decoded_tbl$dir       <- df_orig$dir[j]
+    decoded_tbl$subdir    <- df_orig$subdir[j]
+
+    decoded[[j]] <- decoded_tbl
+    utils::setTxtProgressBar(pb, j)
+  }
+
+  close(pb)
+
+  long_df <- dplyr::bind_rows(decoded)
+
+  # Build image-level sequencing table
+  image_df <- df_orig
+  seq_info <- lapply(image_df$file_name, parse_sequence)
+  image_df$prefix <- vapply(seq_info, `[[`, "prefix", FUN.VALUE = character(1))
+  image_df$number <- vapply(seq_info, `[[`, "number", FUN.VALUE = integer(1))
+
+  dec_summary <- long_df |>
+    dplyr::group_by(file_name) |>
+    dplyr::summarise(
+      has_symbol = any(!is.na(text) & text != ""),
+      .groups    = "drop"
+    )
+
+  image_df <- dplyr::left_join(image_df, dec_summary, by = "file_name")
+  image_df$has_symbol[is.na(image_df$has_symbol)] <- FALSE
+
+  image_df <- dplyr::arrange(image_df, prefix, number)
+
+  # Stateful donor tracking
+  current_donor  <- NA_character_
+  current_prefix <- NA_character_
+  last_number    <- NA_integer_
+
+  image_df$donor      <- NA_character_
+  image_df$break_case <- FALSE
+
+  for (r in seq_len(nrow(image_df))) {
+    fn  <- image_df$file_name[r]
+    px  <- image_df$prefix[r]
+    num <- image_df$number[r]
+    has <- image_df$has_symbol[r]
+
+    if (has) {
+      current_donor          <- fn
+      current_prefix         <- px
+      last_number            <- num
+      image_df$donor[r]      <- fn
+      image_df$break_case[r] <- FALSE
+
+    } else if (!is.na(current_donor) &&
+               px == current_prefix &&
+               !is.na(num) && num == last_number + 1) {
+
+      image_df$donor[r]      <- current_donor
+      image_df$break_case[r] <- FALSE
+      last_number            <- num
+
+    } else {
+      current_donor          <- NA_character_
+      current_prefix         <- px
+      last_number            <- num
+      image_df$donor[r]      <- NA_character_
+      image_df$break_case[r] <- TRUE
+    }
+  }
+
+  # Propagate symbols
+  propagated <- vector("list", nrow(image_df))
+
+  for (r in seq_len(nrow(image_df))) {
+    img   <- image_df$file_name[r]
+    donor <- image_df$donor[r]
+
+    if (!is.na(donor)) {
+      donor_rows <- long_df[
+        long_df$file_name == donor &
+          !is.na(long_df$text) & long_df$text != "",
+        ,
+        drop = FALSE
+      ]
+
+      if (nrow(donor_rows) == 0L) {
+        df_img <- tibble::tibble(
+          file_name   = img,
+          index       = NA_integer_,
+          code_format = NA_character_,
+          text        = NA_character_,
+          type        = NA_character_
+        )
+      } else {
+        df_img <- donor_rows
+        df_img$file_name <- img
+        df_img$full_path <- file.path(image_df$dir[r], img)
+        df_img$dir       <- image_df$dir[r]
+        df_img$subdir    <- image_df$subdir[r]
+        df_img$rel_path  <- image_df$rel_path[r]
+      }
+
+    } else {
+      this_rows <- long_df[long_df$file_name == img, , drop = FALSE]
+
+      if (nrow(this_rows) == 0L) {
+        df_img <- tibble::tibble(
+          file_name   = img,
+          index       = NA_integer_,
+          code_format = NA_character_,
+          text        = NA_character_,
+          type        = NA_character_
+        )
+      } else {
+        df_img <- this_rows
+      }
+
+      if (isTRUE(image_df$break_case[r])) {
+        no_symbols <- all(
+          (is.na(df_img$code_format) | df_img$code_format == "") &
+          (is.na(df_img$text)        | df_img$text        == "") &
+          (is.na(df_img$type)        | df_img$type        == "")
+        )
+        if (no_symbols) {
+          df_img$code_format <- "unknown"
+          df_img$text        <- "unknown"
+          df_img$type        <- "unknown"
+        }
+      }
+    }
+
+    df_img$prefix <- image_df$prefix[r]
+    df_img$number <- image_df$number[r]
+
+    propagated[[r]] <- df_img
+  }
+
+  long_df_prop <- dplyr::bind_rows(propagated)
+
+  # Join back to index
+  join_cols <- intersect(
+    c("file_name","full_path","index","code_format","text","type","prefix","number"),
+    names(long_df_prop)
+  )
+
+  barcodes <- long_df_prop[, join_cols, drop = FALSE]
+
+  joined_df <- df_orig |>
+    dplyr::left_join(barcodes, by = "file_name")
+
+  message("  Writing updated CSV...")
+  readr::write_csv(joined_df, index_csv_path)
+
+  invisible(joined_df)
+}
+```
+
+This function is basically your existing `resolve_folder_sequence()` but:
+
+*   operates on **one CSV index file**
+*   uses `read_csv()` and `write_csv()` instead of Excel
+*   does not re-list folder contents
+
+***
+
+## 4. New `run_metadata_and_resolve_all.R` (CSV-based)
+
+Now we can rewrite your orchestration script to:
+
+*   get index CSVs from the checkpoint,
+*   add EXIF metadata,
+*   decode + propagate barcodes,
+*   all from CSV, with no extra scanning.
+
+```r
+# scripts/run_metadata_and_resolve_all.R
+
+source("renv/activate.R")
+library(kiwiDecoder)          # for decode_hierarchical_zxing, etc.
+library(dplyr)
+library(readr)
+
+root <- "//kbc-file.pfr.co.nz/files/Projects/Stage2 Clonal Trials/Images/A Auto-Naming"
+
+# Discover index CSVs from checkpoint (only dirs with actual files)
+chk  <- readRDS(file.path(root, "scan_checkpoint.rds"))
+dirs <- chk$dirs_scanned
+
+index_files <- file.path(dirs, paste0(basename(dirs), "_index.csv"))
+index_files <- index_files[file.exists(index_files)]
+
+cat("Found", length(index_files), "index CSV files\n")
+
+for (index_path in index_files) {
+  cat("Processing:", index_path, "\n")
+
+  idx <- readr::read_csv(index_path, show_col_types = FALSE)
+
+  # Ensure full_path exists
+  if (!"full_path" %in% names(idx)) {
+    if (!all(c("dir", "file_name") %in% names(idx))) {
+      stop("Index must contain 'full_path' or 'dir' + 'file_name': ", index_path)
+    }
+    idx$full_path <- file.path(idx$dir, idx$file_name)
+  }
+
+  # 1. EXIF metadata
+  meta <- extract_image_metadata(idx, verbose = TRUE)
+  idx_meta <- idx %>%
+    left_join(meta$data, by = "full_path")
+
+  readr::write_csv(idx_meta, index_path)
+
+  # 2. Decode + propagate barcodes
+  resolve_index_csv(index_path)
+
+  cat("Finished:", index_path, "\n")
+}
+
+cat("ALL DIRECTORIES PROCESSED.\n")
+```
+
+***
+
+## 5. Answering your key questions directly
+
+> **Q: We’re now writing directories/paths to `.csv` instead of `.xlsx`. Will the old functions work?**
+
+Not without changes. The old ones assumed Excel; the updated versions above use CSV (`readr::read_csv`, `write_csv`).
+
+> **Q: Can we only go into folders that have a `*_index.csv`?**
+
+✅ Yes — and we are now doing exactly that by deriving index paths from the checkpoint:
+
+```r
+chk  <- readRDS(file.path(root, "scan_checkpoint.rds"))
+dirs <- chk$dirs_scanned
+index_files <- file.path(dirs, paste0(basename(dirs), "_index.csv"))
+index_files <- index_files[file.exists(index_files)]
+```
+
+No re-scanning the entire network tree.
+
+> **Q: Does the naming `subfolder_index.csv` break anything?**
+
+We’ve aligned everything to that pattern:
+
+*   `scan_directories()` writes `<subdir>_index.csv`
+*   `run_metadata_and_resolve_all.R` derives index paths using that name
+*   `resolve_index_csv()` reads and writes those same files.
+
+***
+
+If you’d like, the next logical step is:
+
+**Stage 3: use the decoded barcode text + KiwiCloud biomaterial metadata to propose safe new filenames, and generate a “rename plan” CSV** (old\_name, new\_name, reason) that you can review before doing any filesystem changes.

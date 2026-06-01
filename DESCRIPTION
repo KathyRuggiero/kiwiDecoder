@@ -1,13 +1,43 @@
 Package: kiwiDecoder
 Type: Package
-Title: What the Package Does (Title Case)
+Title: High-Throughput Barcode and QR-Code Decoding for Clonal Trials
 Version: 0.1.0
-Author: Who wrote it
-Maintainer: The package maintainer <yourself@somewhere.net>
-Description: More about what it does (maybe more than one line)
-    Use four spaces when indenting paragraphs within the Description.
-License: What license is it under?
+Authors@R:
+    person("Kathy", "Ruggiero",
+           email = "kathy.ruggioer@next.kiwi",
+           role = c("aut", "cre"))
+Description: Tools for decoding barcodes and QR codes using the Python ZXing-CPP
+    library, extracting diagnostic information, and integrating decoded symbols
+    with biomaterial metadata from internal KiwiCloud sources. Includes helpers
+    for batch processing, file renaming workflows, and visual diagnostics.
+SystemRequirements: Python (>= 3.8), pillow (>= 10.0), zxingcpp; pillow-heif
+    (optional, enables HEIC/HEIF image support)
+License: file LICENSE
 Encoding: UTF-8
 LazyData: true
 URL: https://github.com/KathyRuggiero/kiwiDecoder
 BugReports: https://github.com/KathyRuggiero/kiwiDecoder/issues
+Imports:
+    readxl,
+    writexl,
+    readr,
+    reticulate,
+    tibble,
+    dplyr,
+    exifr,
+    magick,
+    purrr,
+    jsonlite,
+    Rcpp,
+    rlang,
+    DBI,
+    RPostgres
+Suggests:
+    furrr,
+    future,
+    knitr,
+    rmarkdown
+VignetteBuilder: knitr
+LinkingTo:
+    Rcpp
+RoxygenNote: 7.3.3

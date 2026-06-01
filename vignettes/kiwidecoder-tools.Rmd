@@ -1,1222 +1,1585 @@
 ---
-title: "`kiwidecoder`: A Unified Pipeline for Barcode and QR-Code Decoding in Clonal Trials"
+title: "`kiwiDecoder`: Decoding Barcodes in Clonal Trial Images"
 author: "Kathy Ruggiero"
-date: "2026-01-29"
-output: rmarkdown::html_vignette
-appendix: yes
+date: "`r Sys.Date()`"
+output:
+  html_document:
+    theme: cosmo
+    number_sections: true
+    toc: true
+    toc_float:
+      collapsed: false
+      smooth_scroll: true
 vignette: >
-  %\VignetteIndexEntry{End-to-End Workflow and Diagnostics in kiwidecoder}
+  %\VignetteIndexEntry{End-to-End Workflow for Barcode Decoding in Clonal Trials}
   %\VignetteEngine{knitr::rmarkdown}
-  \usepackage[utf8]{inputenc}
+  %\VignetteEncoding{UTF-8}
 ---
 
-
 ```{r setup, include=FALSE}
-knitr::opts_chunk$set(echo = TRUE)
+knitr::opts_chunk$set(echo = TRUE, eval = FALSE)
 ```
 
-# 1. Introduction
+# What this tool does
 
-Clonal trial imaging at scale produces **thousands of photos** spread across a complex directory tree on a network drive. Each image typically contains one or more **barcodes or QR codes** that encode:
+Clonal variety trials produce thousands of images. Each image is of a plant — a
+specific genotype, at a specific location in a specific orchard block. For those
+images to be useful, we need to know *which plant* each photo belongs to.
 
-*   plant genotypes,
-*   scion identifiers,
-*   locations,
-*   and other trial metadata.
+In the field, the photographer holds up a barcode or QR code card that
+identifies the next subject (its genotype, plot location, or scion code) and
+takes a photo of the card. They then take one or more photos of the plant
+itself. The camera numbers these sequentially:
+`IMG_0042.JPG`, `IMG_0043.JPG`, `IMG_0044.JPG`, …
 
-The goal of `kiwidecoder` is to provide a **unified, traceable, and robust pipeline** that:
+**`kiwiDecoder` reads the identity-card photo and carries that identity forward
+to all the plant photos that follow, automatically, across hundreds of folders
+and thousands of images.**
 
-1.  Scans a root directory on a (slow, network-mounted) file system,
-2.  Builds **per-directory Excel indexes** of image files,
-3.  Decodes **all barcodes and QR codes** in those images using ZXing-CPP (via Python),
-4.  Resolves decoded values across **sequentially numbered filenames**, and
-5.  Writes a **joined long-format table** back into each Excel file for downstream analysis.
+The end result is a data table — one or more rows per image, each annotated with
+the decoded identity. That table can then be used to link images to breeding
+records, rename files by biomaterial name, or flag images where no identity
+could be determined.
 
-In addition, the package provides:
+> **If you are reading this for an overview only:** §1–2 tell the full story in
+> plain English. The rest of the document is a step-by-step guide for the
+> person running the pipeline.
 
-*   low-level functions for **single-image decoding**,
-*   diagnostic tools for **difficult images**,
-*   helpers for **Python/ZXing troubleshooting**, and
-*   mechanisms for running long scans in the **background**.
+---
 
-This vignette explains:
+# How the identification works
 
-*   how barcode detection works under the hood,
+## The photography sequence
 
-*   how to set up the Python environment,
+Imagine the photographer moves through a block and photographs three plants:
 
-*   the end-to-end workflow:
+| File | What was photographed | Has barcode? |
+|---|---|:---:|
+| `IMG_0041.JPG` | Identity card: code `SC00123` | ✓ |
+| `IMG_0042.JPG` | Plant — shoot tip | |
+| `IMG_0043.JPG` | Plant — leaf detail | |
+| `IMG_0044.JPG` | Plant — whole canopy | |
+| `IMG_0045.JPG` | Identity card: code `SC00456` | ✓ |
+| `IMG_0046.JPG` | Plant — shoot tip | |
+| `IMG_0047.JPG` | Plant — leaf detail | |
 
-    ```text
-    scan_directories()
-          ↓
-     write_directory_index()  (per-directory Excel index)
-          ↓
-     resolve_folder_sequence()
-          ↓
-     joined index + barcode results per Excel
-    ```
+`IMG_0041` is the *donor* image — it provides the identity for every image that
+follows, as long as the sequence numbers increase by exactly one. The moment the
+sequence jumps (e.g. `0049` → `0052`), or a new barcode card appears, the chain
+resets. Images with no barcode and no donor in their sequence are flagged as
+`unknown` so they are never silently lost.
 
-*   and how to use diagnostic tools when images fail to decode.
+## What the decoded output looks like
 
-# 2. How Barcode Detection Works in `kiwidecoder`
+After processing, the index CSV for this folder gains barcode and identity
+columns. For the example above, the key columns look like this:
 
-*(A didactic explanation for users who may be new to R, Python, or barcode decoding)*
+| file\_name | text | type | scion\_name | location\_address | prefix | number |
+|---|---|---|---|---|---|---|
+| IMG\_0041.JPG | SC-001-ABC | scion | Hayward | TRC-17-13-19c | IMG | 41 |
+| IMG\_0042.JPG | SC-001-ABC | scion | Hayward | TRC-17-13-19c | IMG | 42 |
+| IMG\_0043.JPG | SC-001-ABC | scion | Hayward | TRC-17-13-19c | IMG | 43 |
+| IMG\_0044.JPG | SC-001-ABC | scion | Hayward | TRC-17-13-19c | IMG | 44 |
+| IMG\_0045.JPG | SC-002-XYZ | scion | Zesy002 | TRC-17-13-21a | IMG | 45 |
+| IMG\_0046.JPG | SC-002-XYZ | scion | Zesy002 | TRC-17-13-21a | IMG | 46 |
+| IMG\_0047.JPG | SC-002-XYZ | scion | Zesy002 | TRC-17-13-21a | IMG | 47 |
 
-The functions in `kiwidecoder` look like ordinary R code, but the actual barcode decoding relies on **Python** and **ZXing-CPP**, a high-performance C++ barcode engine.
+After all five pipeline steps the index CSV for each folder contains exactly
+these columns:
 
-There are two main conceptual layers:
+| Column | Step added | Description |
+|---|---|---|
+| `dir` | Step 1 | Full path of the folder containing the image |
+| `file_name` | Step 1 | Image filename (e.g. `IMG_0042.JPG`) |
+| `ext` | Step 1 | Lowercased file extension (`jpg`, `png`, `heic`, …) |
+| `full_path` | Step 1 | Absolute path to the image file |
+| `index` | Step 2 | Symbol index within the image (1, 2, … if multiple barcodes); `NA` if nothing decoded |
+| `code_format` | Step 2 | Barcode format decoded (e.g. `PDF417`, `QRCode`); `"unknown"` when the image was processed but no barcode was readable |
+| `text` | Step 2 | Raw decoded barcode text; `NA` if nothing decoded |
+| `type` | Step 2 | Code classification: `scion`, `location`, `plant-genotype`, …; `NA` if nothing decoded |
+| `decode_status` | Step 2 | How the barcode information was obtained — see table below |
+| `donor_file` | Step 2 | Filename of the card image whose barcode was propagated to this row; `NA` unless `decode_status == "propagated"` |
+| `scion_name` | Step 3 | Human-readable scion name from KiwiCloud (e.g. `Hayward`) |
+| `scion_genotype` | Step 3 | Genotype string from KiwiCloud (e.g. `K17.0004.03072`) |
+| `location_name` | Step 3 | Site/trial name (e.g. `Te Puke Research Centre`) |
+| `location_address` | Step 3 | Precise vine address (e.g. `TRC-17-13-19c`) |
+| `file_owner` | Step 4 | Windows file owner — best proxy for the photographer |
+| `camera_make` | Step 4 | Camera manufacturer from EXIF (e.g. `Apple`) |
+| `camera_model` | Step 4 | Camera model from EXIF (e.g. `iPhone 13`) |
+| `GPSLatitude` | Step 4 | GPS latitude in decimal degrees (if location services were on) |
+| `GPSLongitude` | Step 4 | GPS longitude in decimal degrees |
+| `DateTimeOriginal` | Step 4 | Capture date and time from EXIF |
 
-1.  **Single-image decoding**  
-    `detect_codes_all_zxing(path)`  
-    → opens one image via Python’s `PIL.Image`, runs ZXing-CPP, and returns one row per detected symbol.
+**`decode_status` values:**
 
-2.  **Folder / index-based workflows**
-    *   Historically: `scan_one_folder()` for simple, non-recursive tests.
-    *   Currently:  
-        `scan_directories()` + `write_directory_index()` + `resolve_folder_sequence()`  
-        for high-throughput decoding and Excel integration.
+| Value | Meaning |
+|---|---|
+| `"decoded"` | The barcode was read directly from this image |
+| `"propagated"` | The barcode text was copied from an adjacent card image (same prefix, sequential number). The source image is in `donor_file`. Treat as indicative — review `donor_file` if precision is needed |
+| `"undecodable"` | This image was processed but no barcode could be decoded, and it had no valid donor to inherit from |
 
-The single-image decoder is the **core engine**; everything else orchestrates it across many files and manages the resulting tables.
+The biomaterial lookup columns (`scion_name` through `location_address`) are
+only populated when a live database connection is supplied — see §4.3.
 
-## 2.1 Python, Pillow, and ZXing-CPP
+If a card holds multiple symbols (e.g. both a scion code and a location code),
+each symbol becomes its own row, so a single image can produce two or more rows.
 
-Barcode detection is performed using the Python bindings to **ZXing-CPP**, a C++ library capable of decoding many 1D and 2D barcode formats, including:
+> **A note on M-prefix codes** (e.g. `M2126`, `MC079`): these are Clonal IDs
+> for male parent genotypes, stored in the `genotype_synonyms` field in
+> KiwiCloud rather than as primary biomaterial names. They are intentionally
+> non-unique in the database (a single Clonal ID can map to multiple records).
+> The pipeline will decode and carry the text forward correctly, but the
+> `scion_name` lookup will not return a match for these codes.
 
-*   PDF417
-*   QR Code
-*   Code39 / Code128
-*   DataMatrix (with constraints in this workflow)
+## How decoded text is classified
 
-R does not currently have an equivalent native library, so `kiwidecoder` uses:
+The decoded text string from each barcode is automatically labelled:
 
-*   **`reticulate`** – to call Python from R,
-*   **`Pillow` (PIL)** – to load images into Python,
-*   **`zxingcpp`** – to decode barcodes from the Python image object.
+| Decoded text | Type assigned |
+|---|---|
+| Starts with `SC` | `scion` |
+| Starts with `RS` | `plant-genotype` |
+| Starts with a letter then two digits (e.g. `A07`) | `location` |
+| Anything else non-empty | `scion-genotype` |
+| Empty / unreadable | `NA` |
 
-Users do **not** need to write any Python code; the R functions manage all calls into Python. The only requirement is that R has access to a Python environment with `pillow` and `zxingcpp` installed.
+## Traceability guarantee
 
-This applies both to:
+Every image always contributes at least one row to the output. The `decode_status`
+column tells you how the barcode information for each row was obtained:
 
-*   local R / RStudio sessions, and
-*   Posit Workbench sessions on shared servers.
+---
 
-## 2.2 Conceptual data flow per image
+**`decode_status = "decoded"` — the barcode was read directly from this image.**
 
-For a single image, the data flow looks like:
+The decoder opened the image, found a barcode-shaped region, and successfully
+decoded the text. This image becomes the *donor* for any images that follow it
+in the same sequence. One row is produced for each unique symbol found; a card
+carrying both a scion code and a location code will produce two rows.
 
-```text
-JPEG/PNG file on disk
-        ↓
-normalizePath() in R
-        ↓
-PIL.Image.open() in Python
-        ↓
-zxingcpp.read_barcodes()  (ZXing-CPP engine)
-        ↓
-list of Python result objects
-        ↓
-extract format + text → R vectors
-        ↓
-tibble: one row per symbol, plus classification
-```
+---
 
-The function guarantees **at least one row per image** by returning a canonical NA row when:
+**`decode_status = "propagated"` — the barcode was copied from a nearby card image.**
 
-*   the image cannot be opened,
-*   Python modules are missing,
-*   ZXing finds no symbol candidates,
-*   or only unsupported formats (e.g., DataBar) are encountered.
+The decoder could not read a barcode from this image (either there is no card in
+frame, or the card could not be decoded). However, the image *does* have a donor:
+a previously decoded image from the same sequence, with a sequence number exactly
+one less than this one.
 
-This property is crucial for downstream **traceability** (see Section 4.4).
+The full set of barcode rows from the donor is copied here, with this image's
+`file_name` substituted. `donor_file` records the filename of the donor image,
+so you can go back and check it if you need to verify the identity.
 
-# 3. Setting Up the Barcode-Decoding Environment
+---
 
-## 3.1 Why Python is needed
+**`decode_status = "undecodable"` — no barcode could be decoded and no donor is available.**
 
-R does not include a high-quality native decoder for formats like PDF417 or Code 128. `kiwidecoder` therefore uses `reticulate` to access Python and load:
+This is the case that often needs explaining. The image was processed — all five
+decoder stages ran — but no barcode could be read. In addition, no prior decoded
+image is available to inherit from.
 
-*   **`Pillow`** (a.k.a. `PIL`) – opens and manipulates images,
-*   **`zxingcpp`** – the barcode-decoding engine.
+**How does the programme know there is no donor?**
 
-You do **not** write Python; you simply ensure these packages are installed once.
+The programme walks through the images for a folder in filename-number order (e.g.
+IMG_7988, IMG_7989, IMG_7990, …). As it goes, it keeps track of the most recently
+decoded image — the current *donor* — for each filename prefix (e.g. `IMG`).
 
-***
+The donor is reset to "none" whenever the sequence is broken. A sequence break
+occurs in any of three situations:
 
-## 3.2 Step 1 — Install `reticulate` (once)
+| Situation | Example | What it means |
+|---|---|---|
+| The sequence number jumps by more than 1 | IMG_7988 → IMG_7990, skipping 7989 | Something happened between these two images. Carrying the old identity across the gap would be unreliable |
+| The filename prefix changes | IMG_7990 → DSC_0001 | A different camera or session. No basis for propagation |
+| No decoded image has been seen yet | First image in the folder | There is simply no prior donor |
+
+When a sequence break occurs AND the current image has no decodable barcode of
+its own, the result is `decode_status = "undecodable"`. The row is still written
+— with `code_format = "unknown"` as a machine marker and `text = NA` — so the
+image is never silently lost from the record.
+
+> **Example:** IMG_7988 has a barcode (`decode_status = "decoded"`, donor for
+> the sequence). IMG_7989 and IMG_7990 have no card in frame; they both inherit
+> from IMG_7988 (`decode_status = "propagated"`, `donor_file = "IMG_7988.HEIC"`).
+> IMG_7992 has no card *and* is missing IMG_7991 in the sequence — that jump
+> breaks the chain. Even though IMG_7988's identity might be correct, the
+> programme cannot safely assume this, so IMG_7992 is marked `"undecodable"`
+> rather than silently inheriting a possibly wrong identity.
+
+---
+
+**`decode_status = NA` — a decoding error occurred at the file level.**
+
+Something went wrong before the barcode search even started: the file could not
+be opened, a Python module was unavailable, or an unexpected error was raised.
+All symbol fields are `NA`. These rows can be filtered with
+`is.na(df$decode_status)`.
+
+---
+
+This means the row count in the output is always ≥ the number of images, and
+no image can silently disappear from the record.
+
+To query specific statuses after building the catalogue:
 
 ```r
-install.packages("reticulate")
+library(readr)
+df <- read_csv(file.path(image_root, "catalogue.csv"))
+
+# Images where the identity was propagated (check donor_file to verify)
+df[df$decode_status == "propagated", c("file_name", "donor_file", "text")]
+
+# Images that could not be decoded at all
+df[df$decode_status == "undecodable", c("file_name", "dir")]
+
+# Any file-level errors
+df[is.na(df$decode_status), c("file_name", "dir")]
 ```
 
-***
+---
 
-## 3.3 Step 2 — Install required Python libraries (once)
+# Setting up the decoding environment
+
+This section explains the software components that `kiwiDecoder` depends on,
+why each one is needed, and how to install them. It is written for someone
+who is comfortable with R but has not used Python or image-processing tools
+before.
+
+## The software landscape — what is doing what
+
+`kiwiDecoder` is an R package, but it calls out to three pieces of additional
+software to do its work:
+
+| Software | What it is | What kiwiDecoder uses it for | Do you need to install it? | Where to get it |
+|---|---|---|---|---|
+| **Python** (with specific packages) | A second programming language | Reading and pre-processing images; running the barcode decoder | **Yes — one-time setup** | Install Miniconda (a lightweight Python installer) from [docs.conda.io/en/latest/miniconda.html](https://docs.conda.io/en/latest/miniconda.html); then use R to create the `kiwidecoder-py` environment and install the required packages (see §3.5) |
+| **ImageMagick** | A standalone image-manipulation program | Cropping images into tiles; converting HEIC photos to PNG before decoding | **No — bundled automatically** | Comes packaged inside the `magick` R package. Running `install.packages("magick")` in R is all that is needed |
+| **ExifTool** | A standalone metadata reader | Extracting camera information (date, GPS, camera model) from image files | **No — bundled automatically** | Comes packaged inside the `exifr` R package. Running `install.packages("exifr")` in R is all that is needed |
+
+In summary: **only Python requires a manual installation step.** ImageMagick and
+ExifTool are installed silently as part of their respective R packages and need
+no attention from you.
+
+You do not need to write any Python, use ImageMagick from the command line,
+or interact with ExifTool directly. All three are called automatically by
+`kiwiDecoder` behind the scenes once they are in place.
+
+## Why Python as well as R?
+
+R is excellent for data wrangling, statistics, and writing analysis pipelines.
+Python is excellent for image processing and has mature libraries for tasks like
+opening unusual image formats and running computer-vision algorithms. The
+barcode-reading engine that `kiwiDecoder` uses — **ZXing-CPP** — has a Python
+interface but no R interface. Rather than rewriting the entire barcode engine
+in R, `kiwiDecoder` uses the `reticulate` R package to call Python code from
+inside R. You install and use `kiwiDecoder` like any other R package; the
+Python calls happen invisibly.
+
+## Python packages needed
+
+Three Python packages must be installed inside the `kiwidecoder-py` environment.
+You install them once (see §3.5). After that you never need to think about them
+again — `kiwiDecoder` loads them automatically every time it needs them.
+
+| Package | What it is | Why it is needed |
+|---|---|---|
+| **Pillow** (also called PIL — Python Imaging Library) | Python's standard image-reading library | Opens image files so they can be passed to the barcode reader |
+| **zxingcpp** | Python wrapper around the ZXing-CPP barcode engine | The actual barcode and QR code reader |
+| **pillow-heif** | A plugin that adds HEIC/HEIF support to Pillow | Lets Pillow open `.HEIC` photos from iPhones (see §3.8) |
+
+**How the packages are loaded — and what you need to do**
+
+Once installed, these packages are loaded automatically inside two `kiwiDecoder`
+functions:
+
+- **`detect_codes_all_zxing()`** — this is the core barcode-reading function.
+  Every time it is called (directly or as part of the pipeline via
+  `resolve_folder_sequence()`), it runs these lines internally:
+
+  ```python
+  # (This is Python, running invisibly inside R via reticulate)
+  import PIL.Image        ← Pillow: opens the image file
+  import pillow_heif      ← pillow-heif: registers HEIC support with Pillow
+  import zxingcpp         ← zxingcpp: reads the barcode
+  ```
+
+- **`decode_hierarchical_zxing()`** — this is the five-stage hierarchical
+  decoder that calls `detect_codes_all_zxing()` on each region. It also
+  imports Pillow and pillow-heif directly for Stage 5 (the greyscale upscale
+  pass).
+
+You do **not** need to type `import`, `library()`, or any Python command
+yourself. The imports happen inside the functions, invisibly, every time the
+pipeline processes an image. The only action required from you is the one-time
+installation described in §3.5 — after that, `kiwiDecoder` handles everything.
+
+## What is a conda environment, and what is `kiwidecoder-py`?
+
+When Python is used across different projects, a common problem arises: Project A
+needs version 1.0 of a package, but Project B needs version 2.0, and the two
+versions are incompatible. A **conda environment** solves this by creating an
+isolated, self-contained installation of Python and its packages for each
+project — they cannot interfere with each other.
+
+Think of it like `renv` for R projects: each project has its own library of
+packages pinned to specific versions, separate from every other project.
+
+**`kiwidecoder-py`** is the name of the conda environment created specifically
+for `kiwiDecoder`. It contains only the Python packages that `kiwiDecoder`
+needs. The name is arbitrary — it could be called anything — but
+`kiwidecoder-py` is the convention used throughout this vignette and in the
+package defaults.
+
+> **One-time setup:** You only need to create the conda environment once on a
+> given computer. After that, `kiwiDecoder` finds and uses it automatically at
+> the start of each R session.
+
+## Creating the Python environment (one-time setup)
+
+**Step 1 — Install Miniconda** (if not already installed)
+
+Conda is the package manager used to create the environment. Miniconda is a
+minimal version that is all you need. Download and install it from:
+<https://docs.conda.io/en/latest/miniconda.html>
+
+Accept all the default options during installation. Restart RStudio afterwards
+so R can find the new installation.
+
+**Step 2 — Create the `kiwidecoder-py` environment**
+
+Run this in your R console (once only):
 
 ```r
+library(reticulate)
+
+reticulate::conda_create("kiwidecoder-py")
+```
+
+This creates a new, empty Python environment named `kiwidecoder-py`. It takes
+a minute or two while conda sets up the base Python installation.
+
+**Step 3 — Install the required Python packages**
+
+```r
+reticulate::use_condaenv("kiwidecoder-py", required = TRUE)
+
 reticulate::py_install(
-  packages = c("pillow", "zxingcpp"),
-  pip = TRUE
+  packages = c("pillow", "zxingcpp", "pillow-heif"),
+  envname  = "kiwidecoder-py",
+  pip      = TRUE
 )
 ```
 
-This will:
+`pip` is Python's package installer (similar to `install.packages()` in R).
+The `pip = TRUE` argument tells conda to use pip for these packages because
+they are not available in the main conda package repository.
 
-*   create a Python environment if needed,
-*   install `pillow`,
-*   install `zxingcpp`,
-*   register the environment for future R sessions.
-
-***
-
-## 3.4 Step 3 — Verify that R can see Python
+**Step 4 — Verify the installation**
 
 ```r
 reticulate::py_config()
 ```
 
-Check that:
+This prints a summary of which Python is active and which packages it can find.
+You should see `kiwidecoder-py` in the path and `pillow`, `zxingcpp`, and
+`pillow-heif` listed as available.
 
-*   a Python executable is detected, and
-*   `pillow` and `zxingcpp` are available in that environment.
+**What to do at the start of each R session**
 
-Once this setup is completed, you can run decoding functions directly:
+Once the environment is created, you only need one line at the start of each
+session before loading `kiwiDecoder`:
 
 ```r
-detect_codes_all_zxing("path/to/image.jpg")
+reticulate::use_condaenv("kiwidecoder-py", required = TRUE)
+library(kiwiDecoder)
 ```
 
-## 3.5 Notes for Posit Workbench users
+You can add `use_condaenv(...)` to your `.Rprofile` so it runs automatically
+every time R starts.
 
-On Posit Workbench:
+> **Troubleshooting — wrong Python:** If `reticulate` picks up the wrong Python
+> environment (e.g. a system Python installation), add the `use_condaenv()` call
+> before `library(kiwiDecoder)`. The `required = TRUE` argument means R will
+> stop with an error rather than silently falling back to the wrong environment.
 
-*   In many setups, `py_install()` can create a **user-specific** environment in your home directory.
-*   If permissions are restricted, your admin may need to install:
+> **Troubleshooting — packages missing:** If `py_config()` shows `pillow`,
+> `zxingcpp`, or `pillow-heif` as not found, re-run the `py_install()` call
+> in Step 3 above.
 
-    *   `pillow`
-    *   `zxingcpp`
+## ImageMagick — what it is and how it is installed
 
-Once they exist in the environment used by your R sessions, `kiwidecoder` will work normally.
+**ImageMagick** is a free, open-source image-processing program that has been
+around since the 1990s. It can open, convert, resize, and crop almost any image
+format imaginable. Think of it as a command-line version of Photoshop that
+other programs can call automatically.
 
-# 4. The End-to-End High-Throughput Workflow
+`kiwiDecoder` uses ImageMagick (via the R package `magick`) for two things:
 
-This section describes the **official production pipeline** for large image sets on a network-mounted drive.
+1. **Converting HEIC files to PNG** — before decoding, each HEIC image is
+   converted to a PNG file once. All subsequent processing works on that PNG,
+   which is much faster to open. See §3.6 for details.
+2. **Cropping tiles** — the hierarchical barcode decoder (§7) cuts the image
+   into overlapping sections to search for small or off-centre barcodes.
+   ImageMagick does the cropping.
 
-## 4.1 High-level workflow overview
+**You do not need to install ImageMagick separately.** When you install the
+`magick` R package, a copy of ImageMagick is bundled with it for Windows and
+macOS. To install `magick`:
 
-We assume you have a root directory like:
-
-```text
-N:/Projects/Stage2 Clonal Trials/Images/
-    ├── Male Photos 2024_25/
-    │     ├── IMG_0001.JPG
-    │     ├── IMG_0002.JPG
-    │     └── ...
-    ├── Greenhouse/
-    │     ├── bench_001.JPG
-    │     └── ...
-    └── ...
+```r
+install.packages("magick")
 ```
 
-The workflow is:
+You can verify it is working:
 
-```text
-(1) scan_directories()
-      ↓
-Per-directory Excel indexes via write_directory_index():
-   N:/.../Male Photos 2024_25/Male Photos 2024_25.xlsx
-   N:/.../Greenhouse/Greenhouse.xlsx
-   ...
-
-(2) resolve_folder_sequence()
-      ↓
-Joined index + barcode tables written back to those Excel files:
-   - original columns (dir, subdir, file_name, ext, rel_path, ...)
-   - barcode columns (index, code_format, text, type, prefix, number, resolved_text)
+```r
+library(magick)
+magick::magick_config()   # should print ImageMagick version and enabled features
 ```
 
-**Key design choices:**
+The output should show `heic` listed under *Enabled features*, confirming that
+ImageMagick can handle Apple's HEIC format.
 
-*   Network I/O is slow → we use **depth-first traversal + checkpointing**.
-*   Excel files must not be corrupted → we use **safe atomic writes**.
-*   Every image must be traceable → we guarantee **at least one row per image** at all stages.
-*   Filenames encode useful structure → we use `resolve_sequence()` to propagate meaning.
+## ExifTool — what it is and how it is used
 
-## 4.2 Step 1 — Scanning and indexing with `scan_directories()`
+Every digital photo contains hidden data recorded at the moment of capture —
+the date and time, which camera model was used, the GPS coordinates if location
+services were on, and many more fields. This hidden data is called **EXIF data**
+(*Exchangeable Image File Format*). It is embedded inside the image file itself
+and is invisible when you open the photo normally.
 
-`scan_directories()`:
+**ExifTool** is a free program, written by Phil Harvey, that reads and writes
+EXIF data from image files. It understands hundreds of camera brands and image
+formats, including HEIC.
 
-*   walks the directory tree under `root`,
-*   filters files by extension and optional filename prefixes,
-*   calls `write_directory_index()` for each directory,
-*   writes an Excel index per directory,
-*   tracks progress via a checkpoint, so long runs can be resumed.
+`kiwiDecoder` uses ExifTool (via the R package `exifr`) in Step 4 of the
+pipeline to extract the fields needed for the output table: `camera_make`,
+`camera_model`, `DateTimeOriginal`, `GPSLatitude`, and `GPSLongitude`.
 
-```{r scan-directories, eval = FALSE}
-library(kiwidecoder)   # replace with actual package name
+**You do not need to download or install ExifTool separately.** A copy of
+ExifTool is bundled inside the `exifr` R package. Install `exifr` the usual way:
 
-# Set the root of your image tree on the network drive.
-image_root <- "N:/path/to/your/image/root"  # <-- EDIT THIS
-
-scan_result <- scan_directories(
-  root            = image_root,
-  extensions      = c("jpg", "jpeg", "png"),
-  prefixes        = c("^PMC_[0-9]{5}$", "^DSC_[0-9]{4}$",
-                      "^IMG_[0-9]{4}$", "^P[0-9]{7}$"),
-  checkpoint_file = "scan_checkpoint.rds",
-  resume          = TRUE,
-  dry_run         = FALSE,
-  log_file        = file.path(image_root, "scan_log.csv"),
-  max_path_length = 255
-)
-
-str(scan_result$dirs_scanned)
-head(scan_result$long_path_warnings)
+```r
+install.packages("exifr")
 ```
 
-### When to use `dry_run = TRUE`
+**The search messages you will see**
 
-If you are unsure:
+The first time `kiwiDecoder` is loaded in a new R session, `exifr` searches for
+ExifTool and prints a progress log like this:
 
-*   how many directories will be visited,
-*   whether path lengths are safe for Excel,
-*   whether your `prefixes` are correct,
+```
+Could not find ExifTool at any of the following locations: ...
+Trying perl command: `perl`
+Perl found at `perl`
+ExifTool found at `perl` with args "C:/.../exifr/exiftool/exiftool.pl"
+Using ExifTool version 12.22
+```
 
-run a dry run first:
+**These messages are informational, not errors.** ExifTool was found and will
+work correctly. The messages appear because `exifr` checks several locations
+before finding the bundled copy. To suppress them so they do not appear again,
+run this once interactively at the start of each session:
 
-```{r scan-dry-run, eval = FALSE}
+```r
+exifr::configure_exiftool()
+```
+
+This tells `exifr` exactly where its bundled ExifTool lives, so the search is
+skipped on the next load. You can add this line to your `.Rprofile` for
+permanent suppression.
+
+> **Perl?** ExifTool is written in Perl, which is a third programming language.
+> You do not need to know anything about Perl — `exifr` manages this completely.
+> Perl is almost certainly already installed on your Windows machine as part of
+> R's own tool chain. The `Trying perl command` message simply confirms that Perl
+> was found and ExifTool can run.
+
+> **renv snapshot warning:** Running `renv::snapshot()` may print
+> `Could not find perl at any of the following locations`. This is a known quirk
+> of how `renv` checks packages: it runs `exifr`'s Perl-detection code, which
+> looks in fixed Windows locations rather than the system PATH. It does not
+> affect the pipeline — Perl is found correctly at runtime.
+
+## HEIC/HEIF files (Apple iPhone photos)
+
+### What HEIC is
+
+If the trial photographs were taken on iPhones, most or all of the image files
+will end in `.HEIC` (or `.heic`) rather than `.JPG`. **HEIC** stands for *High
+Efficiency Image Container*. Apple introduced it as the default iPhone photo
+format in 2017 (iOS 11).
+
+HEIC uses a more advanced compression algorithm than JPEG — roughly half the
+file size for the same visual quality. The downside is that the format is less
+widely supported: JPEG has been the standard since the 1990s and every imaging
+library understands it, but HEIC requires specific support to be added.
+
+### Why HEIC causes extra work for the pipeline
+
+The barcode decoder (ZXing-CPP) works on image data that has been opened and
+decoded from the file. For JPEG and PNG files this is fast — the files are
+simple and all major imaging libraries handle them natively. For HEIC, the
+compression algorithm (HEVC, the same as used in H.265 video) is much more
+computationally expensive to decompress.
+
+Without optimisation, `kiwiDecoder` would need to decompress the HEIC file
+three separate times — once for Stage 1 (full-image scan), once for Stages 2–4
+(crop tiles), and once for Stage 5 (upscaled greyscale pass). On a typical
+laptop this takes around 27 seconds just for Stage 1 alone.
+
+### How kiwiDecoder handles HEIC efficiently
+
+`kiwiDecoder` avoids the repeated decompression by **converting each HEIC file
+to a PNG once** at the start of processing, using ImageMagick. PNG (*Portable
+Network Graphics*) is a lossless format — no image quality is lost — and it is
+extremely fast to open. All five decoder stages then work on this temporary PNG
+file instead of reopening the HEIC.
+
+The temporary PNG is created in a system temp folder and automatically deleted
+when the function finishes. It is never saved to your image folders and does not
+appear in the output.
+
+**Confirmed performance on a real iPhone 13 image (12 MP, 3 024 × 4 032 pixels
+after rotation):**
+
+| Operation | Time |
+|---|---|
+| Decompress HEIC directly (PIL) — Stage 1 old approach | 27.2 s |
+| Convert HEIC → PNG once (ImageMagick) | 10.9 s |
+| Open and scan the PNG — Stage 1 new approach | 1.3 s |
+| **Time saved on Stage 1 alone** | **~15 s per image** |
+
+Stages 2–5 also benefit, as they all read the same fast PNG. The one-time
+conversion cost of 10.9 s is shared across all five stages, making the total
+pipeline roughly twice as fast for HEIC images compared to the unoptimised
+approach.
+
+ImageMagick also automatically reads the EXIF orientation tag when converting —
+if the phone stored the image sideways (which iPhones do internally), the PNG
+is already correctly rotated so the barcode reader sees it the right way up.
+
+If the HEIC → PNG conversion fails for any reason (e.g. the file is corrupted),
+the pipeline falls back automatically to opening the original HEIC file directly
+in each stage. No images are silently skipped.
+
+### Which component reads HEIC at each step
+
+| Step | What reads the file | Notes |
+|---|---|---|
+| Pre-conversion (once per image) | ImageMagick (via `magick`) | Bundled with the `magick` R package; handles HEIC natively |
+| Stages 1–5 — barcode scanning | Pillow on the pre-converted PNG | PNG needs no special plugin |
+| Step 4 — photo metadata | ExifTool (via `exifr`) | Reads EXIF from the original HEIC; bundled with `exifr` |
+
+The `pillow-heif` Python plugin is also installed as a safety net: on computers
+where ImageMagick's HEIC support is not enabled, `pillow-heif` allows Pillow
+itself to open the original HEIC file directly. Installing both covers all
+scenarios.
+
+### Enabling HEIC in the file scanner
+
+Add `"heic"` to the `extensions` argument of `scan_directories()` (it is
+included in the default list):
+
+```r
 scan_directories(
-  root            = image_root,
-  dry_run         = TRUE,
-  log_file        = file.path(image_root, "scan_log.csv")
+  root       = image_root,
+  extensions = c("jpg", "jpeg", "png", "heic"),
+  ...
 )
 ```
 
-This scans, logs, and updates the checkpoint, but does **not** write Excel files.
+Extension matching is case-insensitive: `.HEIC` and `.heic` are both recognised.
 
-This is particularly useful on **network drives** where scanning can take many hours.
+### If your folders contain only JPG files
 
-## 4.3 Step 2 — Per-directory indexing with `write_directory_index()`
-
-For each directory discovered, `scan_directories()` calls:
+If trial photos were taken on a camera that produces JPEG files rather than
+HEIC, simply omit `"heic"` from `extensions` and skip the `pillow-heif`
+install. The pipeline works identically for JPEG files; all of the HEIC handling
+described above is bypassed automatically.
 
 ```r
-write_directory_index(
-  dir        = current_dir,
-  extensions = extensions,
-  prefixes   = prefixes,
-  excel_path = excel_path
-)
-```
-
-This produces a simple per-directory Excel file with one row per image and columns like:
-
-*   `dir`      – full directory path containing the image,
-*   `subdir`   – basename of `dir`,
-*   `file_name`– the image filename,
-*   `ext`      – lowercased extension (`"jpg"`, `"png"`, ...),
-*   `rel_path` – relative path within `dir` (by default the same as `file_name`).
-
-You can also use it directly for a single folder:
-
-```{r write-directory-index-single, eval = FALSE}
-one_dir <- file.path(image_root, "ExampleSubdir")  # <-- EDIT
-index_path <- file.path(one_dir, "ExampleSubdir.xlsx")
-
-index_df <- write_directory_index(
-  dir        = one_dir,
+scan_directories(
+  root       = image_root,
   extensions = c("jpg", "jpeg", "png"),
-  prefixes   = NULL,  # index all matching images
-  excel_path = index_path
-)
-
-index_df
-```
-
-## 4.4 Data lineage and traceability
-
-A key design principle in `kiwidecoder` is **per-image traceability**:
-
-*   Every image in the directory tree appears in exactly one per-directory Excel index (subject to extension/prefix filters).
-*   Every decoding step produces **at least one row per image**:
-    *   `detect_codes_all_zxing()` returns an NA row if needed.
-    *   `resolve_folder_sequence()` joins decoding results back to original index rows.
-*   The final joined Excel tables contain:
-    *   original structural columns (`dir`, `subdir`, `file_name`, `ext`, `rel_path`, `full_path`, etc.), plus
-    *   per-symbol decoding data (`index`, `code_format`, `text`, `type`, `resolved_text`, etc.).
-
-This means you can always:
-
-*   trace any decoded value back to:
-    *   its **source image file**, and
-    *   its location in the directory tree,
-*   diagnose missing or corrupted barcodes (NA rows are explicit),
-*   reconcile with external metadata (e.g., from KiwiCloud).
-
-This is vital in breeding and clonal trial contexts where:
-
-*   Audit trails are required,
-*   Reprocessing may happen months later,
-*   Multiple collaborators may touch the same data.
-
-## 4.5 Step 3 — Decoding barcodes with `resolve_folder_sequence()`
-
-Once your per-directory Excel index files exist, you can decode all images and join results back into those workbooks using `resolve_folder_sequence()`.
-
-```{r resolve-folder-sequence, eval = FALSE}
-index_root <- image_root  # or a subfolder containing the index .xlsx files
-
-joined_results <- resolve_folder_sequence(
-  path    = index_root,
-  pattern = "\\.xlsx$"   # or more specific if needed
-)
-
-length(joined_results)
-names(joined_results)[1:3]
-```
-
-For each workbook, `resolve_folder_sequence()`:
-
-1.  Finds `.xlsx` files under `path` (non-lock files).
-2.  Reads the workbook via `readxl::read_xlsx()`.
-3.  Checks writeability via `can_write_xlsx()`.
-4.  For each row (image), constructs `full_path` and calls `detect_codes_all_zxing()`:
-    *   obtains one or more decoded symbols, or
-    *   a single NA row if nothing usable is found.
-5.  Binds all decoded rows into a long-format tibble.
-6.  Applies `resolve_sequence()` to:
-    *   parse filename `prefix` and `number`,
-    *   statefully propagate `resolved_text`.
-7.  Reduces to barcode-specific columns + join key(s).
-8.  Performs a **one-to-many join** back onto the original index rows.
-9.  Writes the joined table back to the same Excel file via `safe_write_xlsx()`.
-
-The return value is a named list of these joined data frames.
-
-## 4.6 Exploring the joined output
-
-After running `resolve_folder_sequence()`, each Excel workbook now contains:
-
-*   the original per-image index columns, plus
-*   barcode-related columns with potentially multiple rows per image.
-
-Inspect the first result:
-
-```{r inspect-joined-output, eval = FALSE}
-first_file <- names(joined_results)[1]
-first_df   <- joined_results[[1]]
-
-first_file
-dplyr::glimpse(first_df)
-```
-
-You should see columns such as:
-
-*   `dir`, `subdir`, `file_name`, `ext`, `rel_path`, `full_path` (if present),
-*   `index`, `code_format`, `text`, `type`,
-*   `prefix`, `number`, `resolved_text`.
-
-Some quick summaries:
-
-```{r summaries, eval = FALSE}
-library(dplyr)
-
-# How many images indexed per directory?
-first_df %>%
-  distinct(dir, file_name) %>%
-  count(dir, name = "n_images")
-
-# How many barcode symbols per image?
-first_df %>%
-  count(file_name, name = "n_symbols") %>%
-  arrange(desc(n_symbols)) %>%
-  head()
-
-# Most common resolved_text values
-first_df %>%
-  filter(!is.na(resolved_text)) %>%
-  count(resolved_text, sort = TRUE) %>%
-  head()
-```
-
-## 4.7 Running long scans and writes in the background
-
-On network-mounted drives, `scan_directories()` and `resolve_folder_sequence()` can take **many hours** because:
-
-*   file listing and stat calls are slow,
-*   Excel writing is relatively heavy,
-*   decoding thousands of images is CPU- and I/O-intensive.
-
-It is often preferable to run these in the background.
-
-### 4.7.1 Using RStudio Jobs
-
-Create a script, e.g. `scripts/run_scan_directories.R`:
-
-```r
-# scripts/run_scan_directories.R
-library(kiwidecoder)
-
-image_root <- "N:/path/to/your/image/root"  # <-- EDIT
-
-scan_directories(
-  root            = image_root,
-  extensions      = c("jpg", "jpeg", "png"),
-  prefixes        = c("^PMC_[0-9]{5}$", "^DSC_[0-9]{4}$",
-                      "^IMG_[0-9]{4}$", "^P[0-9]{7}$"),
-  checkpoint_file = "scan_checkpoint.rds",
-  resume          = TRUE,
-  dry_run         = FALSE,
-  log_file        = file.path(image_root, "scan_log.csv"),
-  max_path_length = 255
+  ...
 )
 ```
 
-Then in RStudio:  
-**Jobs → Run Script as Job…** → select the script.
+### What happens if `pillow-heif` is not installed
 
-Do the same for `resolve_folder_sequence()` if needed.
+If you accidentally try to decode HEIC files without `pillow-heif` installed,
+the pipeline degrades gracefully rather than crashing:
 
-### 4.7.2 Using `callr::r_bg()` for background execution
+1. Step 1 (`scan_directories`) is unaffected — it only reads filenames, not
+   image contents.
+2. In Step 2, when the decoder tries to open each HEIC file, Pillow cannot
+   recognise the format and raises an error. This error is caught quietly, and
+   a single `NA` row is written for the image — the same output as a photo with
+   no barcode.
+3. Processing continues with the next image.
 
-```{r background-callr, eval = FALSE}
-# install.packages("callr")
-library(callr)
+The result is `NA` barcode values for every HEIC file, with a warning message
+printed for each one. You can identify the affected files, install `pillow-heif`,
+and re-run Step 2 with `overwrite = TRUE` to decode them.
 
-image_root <- "N:/path/to/your/image/root"  # <-- EDIT
+### Verified behaviour on real images
 
-bg_job <- callr::r_bg(
-  func = function(root) {
-    library(kiwidecoder)
-    scan_directories(
-      root            = root,
-      extensions      = c("jpg", "jpeg", "png"),
-      prefixes        = c("^PMC_[0-9]{5}$", "^DSC_[0-9]{4}$",
-                          "^IMG_[0-9]{4}$", "^P[0-9]{7}$"),
-      checkpoint_file = "scan_checkpoint.rds",
-      resume          = TRUE,
-      dry_run         = FALSE,
-      log_file        = file.path(root, "scan_log.csv"),
-      max_path_length = 255
-    )
-  },
-  args = list(root = image_root)
-)
+A full pipeline run was completed on a 10-image sample of iPhone 13 HEIC photos
+from the `4 Ripe fruit photos (Auckland)/2026/` trial folder (12 MP,
+captured 2026-02-16).
 
-# Monitor / collect result
-bg_job$is_alive()
-bg_job$get_result()
+**Step 1 — `write_directory_index()`**
+
+```
+Rows indexed: 304
+Extensions: heic (304)
+Columns: dir, file_name, ext, full_path
 ```
 
-Because the operations are mostly **I/O bound** (network latency), it is perfectly reasonable to let them run in a background process while you continue working interactively.
+All 304 HEIC files indexed correctly.
 
-The `checkpoint_file` ensures you can resume if something interrupts the run (e.g., network hiccups, session timeout).
+**Step 2 — `resolve_index_csv()` with KiwiCloud connection**
 
-# 5. Core Decoding and Interpretation Functions
-
-This section describes the key functions that can also be used on their own, outside the full Excel workflow.
-
-## 5.1 `detect_codes_all_zxing()` – decode a single image
-
-`detect_codes_all_zxing(path)` is the **core single-image decoder**.
-
-Behaviour:
-
-*   Normalises the path with `normalizePath()`.
-*   Tries to import `PIL.Image` and `zxingcpp`.
-*   Opens the image via `PIL.Image.open()`.
-*   Calls `zxingcpp.read_barcodes()` with rotation and downscaling enabled.
-*   Filters out results where `valid == FALSE` if that field exists.
-*   Drops GS1 DataBar formats (not used in this workflow).
-*   If nothing usable remains:
-    *   returns one NA row with the image path in `file`.
-*   Otherwise:
-    *   returns one row per symbol with columns: `file`, `index`, `code_format`, `text`, `type`.
-
-Example:
-
-```{r detect-single, eval = FALSE}
-img_path <- "N:/Projects/Stage2 Clonal Trials/Images/Male Photos 2024_25/IMG_0001.JPG"
-
-detect_codes_all_zxing(img_path)
+```
+Decoding 10 image(s)...
+Looking up biomaterial names for 1 unique code(s)...
+Step 2 done in 482 sec
 ```
 
-Typical output:
+Nine of the ten images decoded to a scion barcode. The first image had no label
+in frame and was marked `undecodable`. The decoded identity was propagated
+forward automatically to the remaining eight images in sequence.
 
-```text
-# A tibble: 3 × 5
-  file                               index code_format text    type           
-  <chr>                              <int> <chr>       <chr>   <chr>          
-1 N:/.../IMG_0001.JPG                    1 QRCode      RS0270  plant-genotype
-2 N:/.../IMG_0001.JPG                    2 Code39      MC079   scion         
-3 N:/.../IMG_0001.JPG                    3 QRCode      SC-0123 scion         
+**Step 3 — `enrich_one_index_with_metadata()`**
+
+```
+file_owner:       10/10 non-missing
+camera_make:      10/10 non-missing   (Apple)
+camera_model:     10/10 non-missing   (iPhone 13)
+GPSLatitude:       0/10 non-missing   ← Location Services was off on this occasion
+DateTimeOriginal: 10/10 non-missing
 ```
 
-If no usable barcodes are found:
-
-```text
-# A tibble: 1 × 5
-  file                              index code_format text type
-  <chr>                             <int> <chr>       <chr> <chr>
-1 N:/.../Hannah Grafting 14 Dec ...    NA NA          NA    NA
-```
-
-This **“at least one row per file”** guarantee underpins the traceability design of the whole package.
-
-## 5.2 `decode_hierarchical_zxing()` – hierarchical cropping for difficult images
-
-For some images (e.g. benches with many pots), barcodes may be:
-
-*   small relative to the whole image,
-*   off-centre,
-*   clustered in particular bands.
-
-`decode_hierarchical_zxing(path)` applies a structured search:
-
-1.  Full image,
-2.  Top and bottom halves,
-3.  Top/middle/bottom thirds,
-4.  3×3 grid tiles (final stage).
-
-At each stage (except the final grid), if **any usable symbols** are found, the function returns those rows and stops.
-
-Each row contains:
-
-*   `file` – original image path,
-*   `index`, `code_format`, `text`, `type`,
-*   region metadata: `source`, `region_x`, `region_y`, `region_w`, `region_h`.
-
-Example:
-
-```{r decode-hierarchical, eval = FALSE}
-img_path <- "N:/Projects/.../Greenhouse/bench_001.JPG"
-decode_hierarchical_zxing(img_path)
-```
-
-Use this when:
-
-*   ordinary `detect_codes_all_zxing()` returns only NA rows, but you suspect small codes,
-*   you want to localise where in the image codes are being detected.
-
-## 5.3 `resolve_sequence()` – stateful interpretation of sequential filenames
-
-`resolve_sequence(df)` takes a **long-format** data frame with at least:
-
-*   `file_name`,
-*   `text` (decoded text, possibly `NA`),
-
-and:
-
-*   parses `prefix` + `number` from the filename stem using pattern:
-
-    ```r
-    "^([A-Za-z]+)_([0-9]+)$"
-    ```
-
-*   collapses rows per file into a per-image `decoded_text` (first non-NA),
-
-*   orders files by `(prefix, number)`,
-
-*   carries forward decoded values along sequential filenames,
-
-*   assigns `"unknown"` when the chain breaks,
-
-*   joins a `resolved_text` column back to each row for that file.
-
-Example:
-
-```{r resolve-sequence-manual, eval = FALSE}
-test_df <- tibble::tibble(
-  file_name = c("IMG_0001.JPG", "IMG_0001.JPG", "IMG_0002.JPG", "IMG_0004.JPG"),
-  text      = c("A1", NA, NA, "B2")
-)
-
-resolve_sequence(test_df)
-```
-
-Expected `resolved_text`:
-
-```text
-[1] "A1" "A1" "A1" "B2"
-```
-
-Note:  
-In real data, this is applied automatically inside `resolve_folder_sequence()` after decoding all images.
-
-## 5.4 Naming conventions and prefix/number parsing
-
-The sequence logic assumes filenames of the form:
-
-```text
-PREFIX_NUMBER.EXT
-e.g. IMG_0001.JPG, DSC_0123.JPG
-```
-
-If filenames deviate from this pattern:
-
-*   `prefix` and `number` become `NA`,
-*   `resolve_sequence()` cannot propagate states across those images,
-*   `resolved_text` will often fall back to `"unknown"`.
-
-This is by design:
-
-*   To avoid silently misinterpreting filenames,
-*   To make non-conforming images stand out.
-
-In practice, this means:
-
-*   It is helpful to **standardise imaging naming schemes** (e.g., `IMG_0001.JPG`, `IMG_0002.JPG`, …).
-*   Files outside these conventions can still be decoded; they simply do not benefit from sequence propagation.
-
-## 5.5 Semantic classification of decoded text (`.classify_type()`)
-
-Internally, `detect_codes_all_zxing()` calls an internal helper (e.g., `.classify_type()`) that:
-
-*   looks at decoded `text`,
-*   assigns labels like:
-    *   `"plant-genotype"`,
-    *   `"scion"`,
-    *   `"location"`,
-    *   `"scion-genotype"`,
-    *   etc.
-
-The exact rules are specific to your naming schemes (e.g., prefixes like `RS`, `MC`, `SC`).
-
-Semantics:
-
-*   `type` is **not required** for the pipeline to work:  
-    all joining and sequence logic uses `file_name` and `text`.
-*   However, it is extremely useful for:
-    *   summarising how many plant vs scion vs location codes,
-    *   filtering for only certain types of codes,
-    *   QA: checking that the right type of code appears where expected.
-
-If you later change the classification logic, you can re-run:
-
-*   `resolve_folder_sequence()`  
-    on existing indexes to refresh `type` labels while preserving the original decodes.
-
-# 6. Diagnostic and Development Helpers
-
-This section covers tools that are **not** part of the main production pipeline but are very useful for:
-
-*   quick tests on small subsets,
-*   debugging difficult images,
-*   exploring ZXing-CPP behaviour.
-
-## 6.1 `scan_one_folder()` – non-recursive test decoder
-
-`scan_one_folder(folder)` was originally written to:
-
-*   test end-to-end decoding in a **single folder**,
-*   avoid waiting for full-tree scans (\~7+ hours on the network),
-*   quickly inspect how `detect_codes_all_zxing()` behaves.
-
-It:
-
-*   lists `.jpg`, `.jpeg`, `.png` files in `folder` (non-recursive),
-*   calls `detect_codes_all_zxing()` on each,
-*   if a given image yields 0 rows (no usable results), injects a single NA row,
-*   binds everything into one tibble (one or more rows per file).
-
-Example:
-
-```{r scan-one-folder, eval = FALSE}
-test_folder <- "N:/path/to/a/small/test/folder"  # <-- EDIT
-res <- scan_one_folder(test_folder)
-dplyr::glimpse(res)
-```
-
-Typical use cases:
-
-*   sanity-checking the Python/ZXing setup on a small folder,
-*   testing the effect of image quality changes,
-*   rapid iterations on `.classify_type()` rules.
-
-For **production**, you should use the full index-based pipeline (`scan_directories()` + `resolve_folder_sequence()`), but `scan_one_folder()` remains very handy for development.
-
-## 6.2 Diagnosing difficult images
-
-In practice, not all tags scan cleanly:
-
-*   barcodes can be tiny,
-*   tags may be blurred or low contrast,
-*   symbols may be detected but undecodable due to damage.
-
-`kiwidecoder` provides two main diagnostic helpers here:
-
-*   `debug_zxing_read()` – inspect raw ZXing-CPP results (including errors),
-*   `decode_full_then_center_crop()` – retry decoding on a central crop.
-
-Absolutely — your vignette section *should* be updated now that `debug_zxing_read()` is working cleanly and gives **two distinct kinds of diagnostic outcomes**:
-
-1.  **Case A — ZXing sees *nothing at all* (IMG\_0355.jpg)**
-2.  **Case B — ZXing sees multiple symbols, some good, some corrupted (IMG\_6688.jpg)**
-
-You also asked for:
-
-*   clearer, human-readable output (folder, filename separated)
-*   improved wording
-*   “next steps” guidance
-*   updated examples in the vignette
-
-Below is a **fully updated, improved vignette section**, rewritten so you can paste it directly into your Rmarkdown vignette.
-
-It is **clean, accurate, readable**, and reflects the NEW behaviour of your improved `debug_zxing_read()`.
-
-***
-
-### 6.2.1 Inspecting ZXing’s raw output with `debug_zxing_read()`
-
-When `detect_codes_all_zxing()` returns only an NA row, this can mean either:
-
-1. **No barcode‑like region was detected at all**, or  
-2. **A barcode was detected but could not be decoded** (e.g. due to damage, blur, occlusion).
-
-These two cases have different practical implications, and  
-`debug_zxing_read()` helps you distinguish them.
-
-The function prints **ZXing’s raw per‑symbol diagnostics**, including:
-
-- detected format (`QRCode`, `Code39`, `RMQRCode`, etc.)
-- decoded text (if any)
-- error messages (e.g., checksum failures)
-- validity flag (`TRUE`/`FALSE`)
-
-This makes it possible to tell the difference between  
-*“nothing found”* and *“found something but it’s unreadable.”*
+All expected fields extracted from HEIC EXIF. GPS was absent because the
+photographer had Location Services disabled at the time — this is a per-session
+iOS setting, not a limitation of the HEIC format or ExifTool.
+
+**Final output:** all 20 columns present across all 10 images, no errors, no
+format-specific workarounds required.
 
 ---
 
-#### **Case A — No candidate barcode regions found (e.g. IMG_0355.jpg)**
+# Connecting to KiwiCloud (Yugabyte)
+
+## Why a database connection is needed
+
+Barcodes and QR codes on field labels contain machine codes — strings like
+`C.91606`, `SC-002-6MY`, or `RS022354`. These codes are the *key* into the
+KiwiCloud database; they do not themselves tell you which variety the plant is,
+where it is planted, or what trial it belongs to.
+
+**KiwiCloud** is the KBC production database, hosted on Yugabyte (a
+PostgreSQL-compatible cloud database). It holds the complete biomaterial
+registry — every scion accession, cane, plant, and their orchard locations.
+Without a connection to KiwiCloud, the pipeline can decode the barcode text but
+cannot resolve it into a human-readable scion name or vine address.
+
+**For image renaming, the connection is required.** The decoded barcode text
+alone (`C.91606`, `SC-002-6MY`, etc.) is a machine key — not a human-readable
+name. The columns needed to construct a meaningful filename —
+`scion_name`, `scion_genotype`, `location_name`, `location_address` — are
+only populated by the KiwiCloud lookup. Without them the catalogue is useful
+for auditing which images carry barcodes, but you cannot produce renamed files
+from it.
+
+The connection *can* be skipped if your goal is purely to audit barcode
+coverage (e.g. checking which images decoded vs. which are unlabelled),
+because barcode decoding itself is entirely offline.
+
+## Required R packages
+
+Two packages are needed: `DBI` provides the database interface functions
+(`dbConnect()`, `dbGetQuery()`, `dbDisconnect()`), while `RPostgres` provides
+the PostgreSQL driver that `DBI` uses to communicate with Yugabyte.
 
 ```r
-debug_zxing_read("images/IMG_0355.jpg")
-
-Output:
-
-File folder: C:/Users/Kathy.Ruggiero/OneDrive - The Kiwifruit Breeding Centre/Documents/kbc/projects/other/rename-images/images
-
-No candidate symbols or decode errors returned by ZXing for image file: IMG_0355.jpg. 
-This usually means ZXing could not find any barcode/QR region at all.
-
-Try the following functions for (possibly) more information:
-  - decode_full_then_center_crop(path)
-  - decode_hierarchical_zxing(path)
-
-If these do not work, visually inspect the image — the barcode may be 
-too small, cropped, low‑contrast, blurred, or otherwise unreadable.
+install.packages(c("DBI", "RPostgres"))
 ```
 
-**Interpretation:**  
-ZXing found *no symbol whatsoever* — not even a damaged one.  
-This typically happens when:
+Both packages are already listed in `kiwiDecoder`'s `DESCRIPTION` under
+`Imports`, so they are installed automatically when you install the package.
 
-*   the barcode is very small in the frame
-*   the region is out of focus
-*   part of the symbol is cropped
-*   lighting/contrast is too poor
-*   the symbology is unsupported
+## Connection credentials
 
-In these cases, retaking the photo is usually required.
+The credentials for the read-only KiwiCloud connection are stored in:
 
-***
+```
+kbc/projects/stage-2/Data Science/data-validation/source/interact-with-yugabyte.R
+```
 
-#### **Case B — ZXing detects multiple symbols, with a mix of successes and failures**
+The key parameters are:
+
+| Parameter | Value |
+|---|---|
+| Host | `a86e6e8c3e6f74590b0681a0128a39c3-76cf0d338a8ce628.elb.ap-southeast-2.amazonaws.com` |
+| Port | `5433` |
+| Database | `kup_obs_comp_prod` |
+| User | `kup_ro` (read-only account) |
+| SSL mode | `disable` |
+| Password | see `interact-with-yugabyte.R` |
+
+> **Do not put the password directly in a script that will be committed to
+> version control.** Store it in your `.Renviron` file (see below) and
+> retrieve it with `Sys.getenv()`.
+
+## Storing the password securely
+
+Add this line to your personal `.Renviron` file (one-time setup):
 
 ```r
-debug_zxing_read("images/IMG_6688.jpg")
-
-Output:
-
-    ZXing returned 5 result object(s).
-
-    --- Result 1 ---
-     format : BarcodeFormat.QRCode 
-     text   : RS022354 
-     error  : 
-     valid  : TRUE 
-
-    --- Result 2 ---
-     format : BarcodeFormat.Code39 
-     text   : MC079 
-     error  : 
-     valid  : TRUE 
-
-    --- Result 3 ---
-     format : BarcodeFormat.QRCode 
-     text   : SC-002-JWM 
-     error  : 
-     valid  : TRUE 
-
-    --- Result 4 ---
-     format : BarcodeFormat.RMQRCode 
-     text   : 
-     error  : ChecksumError @ QRDecoder.cpp:361 
-     valid  : FALSE 
-
-    --- Result 5 ---
-     format : BarcodeFormat.MicroQRCode 
-     text   : 82920 
-     error  : ChecksumError @ QRDecoder.cpp:361 
-     valid  : FALSE
-
-**Interpretation:**
-
-ZXing found five symbol‑like regions:
-
-*   Three decode cleanly (`RS022354`, `MC079`, `SC‑002‑JWM`)
-*   Two are mis‑detected tiny QR‑like patterns that fail checksum  
-    (`RMQRCode` and `MicroQRCode` with `valid = FALSE`)
-
-Your higher‑level pipeline (`detect_codes_all_zxing()`) already ignores the  
-invalid/failed ones and keeps only meaningful, valid results.
-
-This diagnostic display is helpful for:
-
-*   understanding why certain cases return multiple rows
-*   verifying that the 1D and QR formats are read correctly
-*   confirming that corrupted symbols are being filtered out
-
-***
-
-### When to use `debug_zxing_read()`
-
-Use this function interactively when:
-
-*   you need to understand *why* an image didn’t decode
-*   you want to distinguish “no symbol at all” from “symbol damaged”
-*   you are developing improvements to your decoding pipeline
-*   you want human‑readable insight into ZXing behaviour
-
-Do **not** use it inside bulk workflows — it is a console-level diagnostic tool.
+# Open .Renviron in RStudio:
+usethis::edit_r_environ()
 ```
 
+In the file that opens, add:
 
-### 6.2.2 Retrying on a central crop with `decode_full_then_center_crop()`
-
-In many tray/field photos, the barcode tag occupies only a small central region. `decode_full_then_center_crop()` provides a simple strategy:
-
-1.  Try full image via `detect_codes_all_zxing()`.
-2.  If nothing usable, crop the central 50%.
-3.  Try decoding the central crop.
-4.  Return whichever results are found, with a `source` flag (`"full"` or `"center_crop"`).
-
-Example:
-
-```{r decode-full-center, eval = FALSE}
-path <- "N:/Projects/.../Male Photos 2023_24/M6121_5 Dec 23 (1).JPG"
-
-res <- decode_full_then_center_crop(path)
-res
+```
+YUGABYTE_PW=<password from interact-with-yugabyte.R>
 ```
 
-If the full image decodes:
+Save and restart R. The password is now available in any R session without
+appearing in your scripts.
 
-```text
-# A tibble: 2 × 6
-  file                             index code_format text    type           source
-  <chr>                            <int> <chr>       <chr>   <chr>          <chr> 
-1 N:/.../M6121_5 Dec 23 (1).JPG        1 PDF417      RS8401  plant-genotype full  
-2 N:/.../M6121_5 Dec 23 (1).JPG        2 QR_CODE     SC1234  scion          full  
-```
-
-If only central crop decodes:
-
-```text
-# A tibble: 1 × 6
-  file                             index code_format text   type    source      
-  <chr>                            <int> <chr>       <chr>  <chr>   <chr>       
-1 N:/.../M6121_5 Dec 23 (1).JPG        1 DataMatrix  A07    location center_crop
-```
-
-If neither decodes, you get a 0-row tibble:
-
-```text
-# A tibble: 0 × 6
-# ℹ 6 variables: file <chr>, index <int>, code_format <chr>, text <chr>, type <chr>, source <chr>
-```
-
-Combined with `debug_zxing_read()`, this gives a powerful toolkit for **explaining why** a particular image fails in the main pipeline.
-
-# 7. Performance and Benchmarking Considerations
-
-`kiwidecoder` is designed for **high-throughput decoding** on **network-mounted drives**, where:
-
-*   I/O is slow,
-*   latency is high,
-*   lots of small file operations are required.
-
-Key design decisions:
-
-*   **Depth-first scanning** in `scan_directories()`:
-    *   completes one subtree at a time,
-    *   minimises thrashing between paths,
-    *   works well with network caching.
-
-*   **Checkpointing**:
-    *   long runs can be resumed (e.g., after 4 hours of work, an interruption only loses a small amount of progress),
-    *   allows incremental builds of index files.
-
-*   **Excel index per directory**:
-    *   localises write operations,
-    *   makes debugging easier (one workbook per folder),
-    *   allows partial reprocessing of specific directories.
-
-*   **Atomic Excel writes (`safe_write_xlsx()`)**:
-    *   prevents partial files if something goes wrong,
-    *   ensures that each workbook is always in a consistent state.
-
-In practice:
-
-*   Full-tree scans plus decoding may take many hours.
-*   The main bottlenecks are:
-    *   network file listing,
-    *   image loading,
-    *   Excel I/O,
-    *   barcode decoding for large images.
-
-Running these operations in a **background job** is not an optimisation per se, but it greatly improves usability by letting you continue other work while the heavy lifting happens in another process.
-
-# 8. Troubleshooting Python and `reticulate`
-
-This appendix is for users who encounter problems such as:
-
-*   missing Python modules,
-*   ZXing not being found,
-*   images failing to open,
-*   or ambiguous errors.
-
-When the Python environment is correct, decoding should “just work”.
-
-## 8.1 When R cannot find required Python libraries
-
-Errors like:
-
-```text
-ModuleNotFoundError: No module named 'PIL'
-```
-
-or:
-
-```text
-ModuleNotFoundError: No module named 'zxingcpp'
-```
-
-mean the Python packages are not installed.
-
-Fix:
+## Opening a connection
 
 ```r
-reticulate::py_install(
-  packages = c("pillow", "zxingcpp"),
-  pip = TRUE
+library(DBI)
+library(RPostgres)
+
+con <- dbConnect(
+  Postgres(),
+  host     = "a86e6e8c3e6f74590b0681a0128a39c3-76cf0d338a8ce628.elb.ap-southeast-2.amazonaws.com",
+  port     = 5433,
+  dbname   = "kup_obs_comp_prod",
+  user     = "kup_ro",
+  password = Sys.getenv("YUGABYTE_PW"),
+  sslmode  = "disable"
 )
 ```
 
-Then restart R and try again.
-
-## 8.2 Multiple Python installations
-
-If `py_config()` shows an unexpected Python path, you may need to choose a specific one:
+Verify the connection is working before running the full pipeline:
 
 ```r
-reticulate::use_python("/path/to/python", required = TRUE)
-reticulate::py_install(c("pillow", "zxingcpp"))
+DBI::dbIsValid(con)          # should return TRUE
+DBI::dbListTables(con)       # should list tables including export_biomaterial_wide
 ```
 
-Then restart R and test again.
-
-## 8.3 Posit Workbench considerations
-
-On Workbench:
-
-*   `py_install()` usually installs packages into a user-private environment.
-*   If blocked, ask your admin to install `pillow` and `zxingcpp` into the shared environment.
-
-Once installed where R can see them, `detect_codes_all_zxing()` and `resolve_folder_sequence()` should work normally.
-
-## 8.4 Errors opening images
-
-If you see:
-
-```text
-Failed to open image with PIL
-```
-
-this may mean:
-
-*   the image file is corrupted,
-*   the file is not a supported format,
-*   `Pillow` needs reinstalling.
-
-Try:
+## Always disconnect when finished
 
 ```r
-reticulate::py_install("pillow")
+DBI::dbDisconnect(con)
 ```
 
-Then restart R and test.
+Leaving a connection open for hours can cause the server to drop it silently.
+If you are running a long pipeline job, open the connection immediately before
+the lookup step and disconnect as soon as it finishes.
 
-## 8.5 When ZXing appears to decode nothing
+## Troubleshooting
 
-If all `code_format` values are `NA` even though images clearly contain barcodes:
+| Symptom | Likely cause | Fix |
+|---|---|---|
+| `could not connect to server` | Not on the KBC network or VPN | Connect to VPN first |
+| `password authentication failed` | Wrong password in `.Renviron` | Check `Sys.getenv("YUGABYTE_PW")` returns the right value |
+| `SSL connection has been closed unexpectedly` | Long-idle connection timed out | Reconnect with `dbConnect(...)` and retry |
+| `lookup_biomaterial_name() failed` printed as a warning | Connection dropped mid-run | Same — reconnect |
+| Columns `scion_name` etc. all NA | Codes not found in database | Normal for M-prefix males and unregistered codes; check `lookup_biomaterial_name(code, con)` interactively |
 
-1.  Check Python config:
+---
 
-    ```r
-    reticulate::py_config()
-    ```
+# The pipeline — step by step
 
-2.  Test decoding a small folder:
+The full workflow has two steps, both designed to run on slow network drives and
+both resumable if interrupted.
 
-    ```r
-    results <- scan_one_folder("path/to/small/test/folder")
-    View(results)
-    ```
+```
+Step 1  scan_directories()
+         ↓
+  One CSV per folder: dir, file_name, ext, full_path
+         ↓
+Step 2  resolve_folder_sequence()
+         ↓
+  + index, code_format, text, type
+  + resolve_log.csv
+         ↓
+Step 3  enrich_index_with_biomaterial(path, con)         [requires KiwiCloud]
+         ↓
+  + scion_name, scion_genotype, location_name, location_address
+  (alternatively: pass con = to resolve_folder_sequence() at decode time)
+         ↓
+Step 4  enrich_index_with_metadata()
+         ↓
+  + file_owner, camera_make, camera_model,
+    GPSLatitude, GPSLongitude, DateTimeOriginal
+         ↓
+Step 5  build_catalogue()
+         ↓
+  catalogue.csv in root — all 18 columns, all folders, one file
+```
 
-If you only see unsupported formats or NA, it might be that:
+## Step 1 — Build a file index
 
-*   the barcodes use a format ZXing-CPP does not support (e.g., MicroPDF417),
-*   the images are too low-resolution.
-
-In that case, the environment is likely fine; the limitation is on the decoding engine or image quality.
-
-## 8.6 When changes to Python are not recognised
-
-`reticulate` initialises Python once per R session. After any significant changes (new packages, changed environment), restart R:
+Before decoding anything, `kiwiDecoder` builds a lightweight inventory of every
+image file in the tree. This serves two purposes: it gives the decoder a stable,
+ordered list to work through, and it means the slow recursive directory scan
+happens only once.
 
 ```r
-.rs.restartR()   # in RStudio
+library(kiwiDecoder)
+
+image_root <- "N:/Trials/Flower_buds/2025"
+
+scan_directories(
+  root            = image_root,
+  extensions      = c("jpg", "jpeg", "png", "heic"),  # HEIC requires pillow-heif
+  prefixes        = c("^IMG_[0-9]{4}$", "^PMC_[0-9]{5}$"),
+  checkpoint_file = "scan_checkpoint.rds",
+  resume          = TRUE
+)
 ```
 
-## 8.7 When to seek further help
+**What it produces:** one CSV file per folder, e.g.
+`Block_A/Block_A.csv`, containing four columns: `dir`, `file_name`, `ext`,
+`full_path`. These become the input to Step 2.
 
-If after:
+**Key parameters:**
 
-*   installing `pillow` and `zxingcpp`,
-*   selecting the correct Python,
-*   restarting R,
+| Parameter | Purpose |
+|---|---|
+| `resume = TRUE` | Picks up where it left off if interrupted |
+| `checkpoint_interval` | Save the RDS checkpoint every N folders (default 10). Higher values mean fewer writes on a slow network drive |
+| `prefixes` | Regex patterns matched against the filename stem — images not matching any pattern are skipped |
+| `dry_run = TRUE` | Scan without writing files — useful for checking what would be indexed |
 
-you still see issues, you may need help from infrastructure support.
+To index a single folder manually:
 
-Provide:
+```r
+write_directory_index(
+  dir        = "N:/Trials/Flower_buds/2025/Block_A",
+  extensions = c("jpg", "jpeg", "png", "heic"),   # default; omit heic if pillow-heif not installed
+  csv_path   = "N:/Trials/Flower_buds/2025/Block_A/Block_A.csv"
+)
+```
 
-*   output of `reticulate::py_config()`,
-*   error messages,
-*   any relevant logs (e.g., long path warnings, decoding errors in the console).
+## Step 2 — Decode barcodes and propagate identities
 
-# 9. Diagnostic Script: `diagnose_barcode_python()`
+`resolve_folder_sequence()` reads every index CSV under `image_root`, decodes
+each image, applies the sequence propagation described in §2, and writes the
+enriched result back to the same CSV files.
 
-To make troubleshooting easier, you can define a helper function:
+```r
+resolve_folder_sequence(path = image_root)
+```
 
-```{r diagnose-python, eval = FALSE}
-diagnose_barcode_python <- function() {
-  cat("=== Barcode Python Environment Diagnostic ===\n\n")
-  
-  # 1. Check that reticulate is installed
-  if (!requireNamespace("reticulate", quietly = TRUE)) {
-    cat("reticulate is NOT installed.\n")
-    cat("Please install it with:\n\n")
-    cat('  install.packages("reticulate")\n\n')
-    cat("Then restart R and run this diagnostic again.\n")
-    return(invisible(list(
-      ok          = FALSE,
-      has_retic   = FALSE,
-      py_config   = NULL,
-      has_pillow  = NA,
-      has_zxing   = NA
-    )))
-  }
-  
-  cat("reticulate is installed.\n\n")
-  
-  # 2. Show Python configuration
-  cat("Checking Python configuration (reticulate::py_config())...\n\n")
-  py_conf <- NULL
-  py_conf <- tryCatch(
-    reticulate::py_config(),
-    error = function(e) {
-      cat("Could not obtain Python configuration.\n")
-      cat("Error was:\n")
-      cat("  ", conditionMessage(e), "\n\n")
-      NULL
-    }
-  )
-  
-  if (is.null(py_conf)) {
-    cat("R could not initialise Python.\n")
-    cat("You may need to install Python or configure reticulate with use_python()/use_condaenv().\n")
-    return(invisible(list(
-      ok          = FALSE,
-      has_retic   = TRUE,
-      py_config   = NULL,
-      has_pillow  = NA,
-      has_zxing   = NA
-    )))
-  }
-  
-  cat("Python configuration detected:\n")
-  cat("  Python path   :", py_conf$python,  "\n")
-  cat("  Python version:", py_conf$version, "\n\n")
-  
-  # 3. Check for Pillow (PIL)
-  cat("Checking for Python package 'pillow' (PIL)...\n")
-  has_pillow <- reticulate::py_module_available("PIL")
-  
-  if (!has_pillow) {
-    cat("Pillow (PIL) is NOT available in this Python environment.\n")
-    cat("You can install it from R with:\n\n")
-    cat('  reticulate::py_install("pillow")\n\n')
-  } else {
-    cat("Pillow (PIL) is available.\n\n")
-  }
-  
-  # 4. Check for zxingcpp
-  cat("Checking for Python package 'zxingcpp'...\n")
-  has_zxing <- reticulate::py_module_available("zxingcpp")
-  
-  if (!has_zxing) {
-    cat("zxingcpp is NOT available in this Python environment.\n")
-    cat("You can install it from R with:\n\n")
-    cat('  reticulate::py_install("zxingcpp")\n\n')
-  } else {
-    cat("zxingcpp is available.\n\n")
-  }
-  
-  # 5. Final summary
-  ok <- isTRUE(has_pillow) && isTRUE(has_zxing)
-  
-  if (ok) {
-    cat("✅ Your Python environment appears to be correctly configured for barcode decoding.\n")
-    cat("You should now be able to run:\n\n")
-    cat('  detect_codes_all_zxing("path/to/image.jpg")\n')
-    cat('  scan_one_folder("path/to/folder")\n\n')
-  } else {
-    cat("⚠ Your Python environment is NOT fully configured yet.\n")
-    cat("Please install any missing packages as indicated above, restart R, and run this diagnostic again.\n\n")
-  }
-  
-  invisible(list(
-    ok          = ok,
-    has_retic   = TRUE,
-    py_config   = py_conf,
-    has_pillow  = has_pillow,
-    has_zxing   = has_zxing
-  ))
+That is all that is needed for a standard run. Progress is logged continuously
+to `resolve_log.csv` in `image_root`.
+
+**What happens internally, for each index file:**
+
+1. Reads the CSV
+2. Decodes every image using hierarchical cropping (see §7)
+3. Parses each filename into a prefix (`IMG`) and sequence number (`42`)
+4. Tracks the most recently decoded image as the *donor* for that prefix
+5. Propagates the donor's symbols forward to consecutive images (same prefix,
+   number + 1)
+6. Joins decoded symbols back to the index (one output row per symbol)
+7. Writes the enriched CSV back to disk
+8. Appends one row per image to `resolve_log.csv`
+
+**To process a single folder** (for re-running one area or testing):
+
+```r
+resolve_index_csv("N:/Trials/Flower_buds/2025/Block_A/Block_A.csv")
+```
+
+## Step 3 — Look up plant identity in KiwiCloud (optional)
+
+Once barcodes are decoded, each unique code is looked up in the KiwiCloud
+database to retrieve the scion name, genotype, and orchard location. There
+are two ways to do this:
+
+For how to open a connection, see **§4 Connecting to KiwiCloud**. Once `con`
+is a valid DBI connection object, pass it to the pipeline.
+
+### Route A — at decode time (recommended when decoding from scratch)
+
+Pass the connection to `resolve_folder_sequence()` and the lookup happens
+automatically as part of decoding:
+
+```r
+con <- dbConnect(...)   # see §4
+
+resolve_folder_sequence(path = image_root, con = con)
+
+dbDisconnect(con)
+```
+
+### Route B — as a separate enrichment step (when CSVs are already decoded)
+
+`enrich_index_with_biomaterial()` reads already-decoded CSVs and adds the
+identity columns without re-decoding any images. Use this when:
+
+- You decoded without a database connection and now want to add identity columns
+- Database records have been updated and you want to refresh the lookup
+
+```r
+con <- dbConnect(...)   # see §4
+
+enrich_index_with_biomaterial(path = image_root, con = con)
+
+# For a single folder:
+enrich_one_index_with_biomaterial(
+  "N:/Trials/Flower_buds/2025/Block_A/Block_A.csv",
+  con = con
+)
+
+dbDisconnect(con)
+```
+
+CSV files that already have a `scion_name` column are skipped by default.
+Use `overwrite = TRUE` to re-query and replace the identity columns.
+
+### What the lookup returns
+
+The lookup handles three barcode types automatically:
+
+| Barcode prefix | Type | Lookup strategy |
+|---|---|---|
+| `C.` (e.g. `C.91606`) | Cane | Finds the cane record, then joins to its scion via `cane_scion_id` |
+| `SC-` (e.g. `SC-001-ABC`) | Scion | Direct match on `biomaterial_name` |
+| `RS` (e.g. `RS022354`) | Plant | Direct match on `biomaterial_name` |
+| Other text | Tries `biomaterial_name` then the `aliases` array | e.g. `T19.58-16-30a` appears only as an alias |
+
+Codes not found in the database (including M-prefix male Clonal IDs — see §2.2)
+will have `NA` for all identity columns.
+
+To check a handful of codes interactively without processing a full folder:
+
+```r
+lookup_biomaterial_name(c("C.91606", "SC-002-6MY"), con)
+```
+
+## Speeding things up with parallel decoding
+
+The image-decoding step is embarrassingly parallel — each image is decoded
+independently. If you have the `furrr` and `future` packages installed, decoding
+can use multiple CPU cores at once.
+
+### How to check how many cores your machine has
+
+Run this in R before deciding how many workers to use:
+
+```r
+parallel::detectCores()                  # logical cores  (includes hyperthreading)
+parallel::detectCores(logical = FALSE)   # physical cores (the real compute units)
+```
+
+**What the numbers mean:**
+
+Modern laptops and desktops use a technology called **hyperthreading** (Intel)
+or **simultaneous multithreading** (AMD) that makes each physical core appear
+as two logical cores to the operating system. For example, a 4-physical-core
+laptop may report 8 logical cores.
+
+- **Physical cores** are the actual independent compute units. For
+  CPU-intensive work (heavy calculation), the physical core count is the
+  ceiling on genuine parallelism.
+- **Logical cores** (physical × 2 with hyperthreading) can still be useful
+  even for intensive work if the task involves waiting — for example, reading
+  image files from a network drive. While one worker waits for a file to
+  arrive over the network, a second worker on the same physical core can be
+  using the CPU to process the previous image. This *I/O overlap* means that
+  going beyond the physical core count can improve throughput for network-drive
+  workloads.
+
+### How many workers to use
+
+| Situation | Recommended `workers =` |
+|---|---|
+| Images on a local drive, CPU-bound work | `parallel::detectCores(logical = FALSE)` — physical cores only |
+| Images on a **network drive** (e.g. `N:/`) | `parallel::detectCores() - 1L` — logical cores minus 1 (leaves one free for RStudio and Windows) |
+| Laptop on battery / need machine to stay responsive | `max(1L, parallel::detectCores(logical = FALSE) - 1L)` — one physical core free |
+
+> **Never use `detectCores()` without subtracting at least 1.** Using every
+> logical core leaves nothing for the operating system and can make your machine
+> unresponsive during the run.
+
+### Example
+
+```r
+library(future)
+library(furrr)
+
+# Check your machine first
+parallel::detectCores()                 # e.g. 8 (logical)
+parallel::detectCores(logical = FALSE)  # e.g. 4 (physical)
+
+# For images on a network drive — use logical cores - 1
+plan(multisession, workers = parallel::detectCores() - 1L)
+
+resolve_folder_sequence(path = image_root)
+
+plan(sequential)   # always restore when done
+```
+
+The propagation and file-writing steps remain sequential; only the decode loop
+runs in parallel.
+
+If `furrr` is not installed, `resolve_folder_sequence()` falls back silently to
+sequential processing — no code changes are needed, but the `plan()` call is
+then ignored.
+
+## Step 4 — Enrich index files with photo metadata (optional)
+
+`enrich_index_with_metadata()` reads every index CSV under `image_root`,
+calls `extract_image_metadata()` on the images it references, and writes the
+metadata columns back into the same CSV file — in the same way that
+`resolve_folder_sequence()` writes barcode columns back.
+
+```r
+enrich_index_with_metadata(path = image_root)
+```
+
+The six columns it adds are:
+
+| Column | Description |
+|---|---|
+| `file_owner` | Windows file-system owner (best proxy for photographer) |
+| `camera_make` | Camera manufacturer from EXIF (e.g. `Apple`) |
+| `camera_model` | Camera model from EXIF (e.g. `iPhone 13`) |
+| `GPSLatitude` | Latitude in decimal degrees (only if location services were on) |
+| `GPSLongitude` | Longitude in decimal degrees |
+| `DateTimeOriginal` | Capture date and time as recorded by the camera |
+
+For each CSV it prints how many of the N images have a non-missing value for
+each field, so you can immediately see whether GPS was recorded and whether
+file ownership is informative.
+
+If metadata columns are already present in a CSV (e.g. from a previous run),
+the file is skipped. To re-extract and overwrite:
+
+```r
+enrich_index_with_metadata(path = image_root, overwrite = TRUE)
+```
+
+**To process a single folder:**
+
+```r
+enrich_one_index_with_metadata(
+  "N:/Trials/Flower_buds/2025/Block_A/Block_A.csv"
+)
+```
+
+**Using `extract_image_metadata()` directly** (returns a tibble, does not
+write to disk — useful for interactive inspection):
+
+```r
+library(readr)
+df_index <- read_csv("N:/Trials/Flower_buds/2025/Block_A/Block_A.csv")
+
+meta <- extract_image_metadata(df_index)
+
+# Coverage summary — how many images have each field?
+meta$field_summary
+
+# The metadata tibble itself
+meta$data
+```
+
+**Why the photographer is hard to identify:**
+
+iPhones and Android phones do not write the photographer's personal name into
+EXIF. The fields that would hold this (`Artist`, `CameraOwnerName`) are blank
+for phone cameras. The best available approach is:
+
+1. `file_owner` — the Windows account that owns the file. If each photographer
+   copies photos from their own phone under their own Windows login, this
+   correctly attributes each image.
+2. `camera_make` + `camera_model` — if different photographers used
+   recognisably different phone models, these can be used as a grouping proxy.
+
+If GPS was on, `GPSLatitude` / `GPSLongitude` can confirm the image was taken
+at the expected trial site.
+
+## Step 5 — Build a root-level catalogue
+
+Once all four enrichment steps are complete, `build_catalogue()` reads every
+per-folder CSV and concatenates them into one file at the root of the image
+tree. This is the single place a human or analyst needs to look to find any
+image in the collection.
+
+```r
+build_catalogue(root = image_root)
+```
+
+This writes `catalogue.csv` to `image_root` and prints a coverage summary:
+
+```
+Reading 412 index CSV file(s)...
+  412 folders | 35408 rows | 31204 decoded | 29817 with scion_name | 27455 with GPS
+Writing catalogue to: N:/Trials/Flower_buds/2025/catalogue.csv
+```
+
+The catalogue is a flat table — one row per barcode symbol per image, with
+all 18 columns. It is safe to open in Excel (rows ≤ ~35K are fine) or load
+directly into R for analysis:
+
+```r
+library(readr)
+catalogue <- read_csv(file.path(image_root, "catalogue.csv"))
+
+# All images for a specific scion
+catalogue[catalogue$scion_name == "SC-001-ABC", ]
+
+# All images taken by a specific photographer
+catalogue[catalogue$file_owner == "Kathy.Ruggiero", ]
+
+# Coverage: how many images decoded vs. total
+table(catalogue$code_format)
+```
+
+`catalogue.csv` is excluded from all pipeline steps — re-running Steps 1–4
+will not read or overwrite it. Regenerate it by running `build_catalogue()`
+again after any pipeline updates.
+
+> **Note:** the catalogue is a snapshot. If new images are added and processed,
+> run `build_catalogue()` again to refresh it.
+
+---
+
+# Monitoring a long run
+
+Decoding large image collections can take hours. `kiwiDecoder` writes a
+per-image log as it goes, so you can check progress at any time without
+interrupting the job.
+
+## Checking progress interactively
+
+```r
+monitor_resolve_progress(root = image_root)
+```
+
+This prints:
+
+- how many images have been processed
+- estimated total and percentage complete
+- the most recently decoded filename
+- a tail of the last 10 log entries
+
+## Running a live monitor in parallel
+
+The recommended approach is to run the decoder in the background and watch
+progress in an RStudio Job — two separate R sessions, neither blocking the
+other.
+
+**In your main console — start the background decoder:**
+
+```r
+library(callr)
+
+bg <- r_bg(
+  func = function(root) {
+    library(kiwiDecoder)
+    resolve_folder_sequence(root)
+  },
+  args = list(root = image_root)
+)
+```
+
+**Save this as `scripts/monitor_resolve.R` and run it as an RStudio Local Job**
+(*Jobs* pane → *Start Local Job*):
+
+```r
+root <- "N:/Trials/Flower_buds/2025"
+
+repeat {
+  cat("Refreshed:", format(Sys.time()), "\n")
+  kiwiDecoder::monitor_resolve_progress(root)
+  Sys.sleep(10)
 }
 ```
 
-Run:
+The monitor refreshes every 10 seconds in its own panel and survives console
+resets. When the background job finishes:
 
 ```r
-diagnose_barcode_python()
+bg$is_alive()    # FALSE when done
+bg$get_result()  # retrieve the output
 ```
 
-to see:
+## The log file
 
-*   which Python is being used,
-*   whether `pillow` and `zxingcpp` are available,
-*   a simple pass/fail summary.
+`resolve_log.csv` (written to `image_root`) has one row per image processed:
 
+| Column | Description |
+|---|---|
+| `time` | Timestamp when the image was processed |
+| `csv_file` | Path to the index CSV being processed |
+| `image_file` | Filename (e.g. `IMG_0042.JPG`) |
+| `full_path` | Full path to the image on disk |
+| `prefix` | Parsed filename prefix (e.g. `IMG`) |
+| `number` | Parsed sequence number (e.g. `42`) |
+| `decoded` | `TRUE` if at least one barcode was successfully read |
 
+---
+
+# How decoding works inside
+
+## The barcode engine
+
+For each image, `kiwiDecoder` calls:
+
+- **Pillow** (Python Imaging Library) to open the image file.
+  JPEG, PNG, and TIFF are supported natively. **HEIC/HEIF** requires the
+  `pillow-heif` plugin, which is registered automatically before every image
+  open — see *"HEIC/HEIF files"* in §3 for setup details.
+- **ZXing-CPP** to scan for and decode symbols
+
+Supported barcode formats include QR Code, PDF417, Data Matrix, Code 128,
+Code 39, and most other common standards.
+
+## Hierarchical cropping
+
+Many barcode cards are photographed at an angle, in partial shade, or occupy
+only a corner of the frame. To maximise detection — and to find **all** barcodes
+when an image contains more than one — `decode_hierarchical_zxing()` runs all
+five stages and accumulates every unique barcode it finds:
+
+1. **Full image** — the fast path; finds most large, prominent barcodes in a
+   single pass.
+2. **Top half / bottom half** — catches barcodes confined to one end of the
+   frame.
+3. **Top third / middle third / bottom third** — horizontal bands for barcodes
+   in the middle of a tall image.
+4. **Sliding-window grid with 50 % overlap** — approximately 25 tiles covering
+   the whole image. The overlap ensures that no small barcode is split across
+   a tile boundary. For images carrying up to 6 barcodes spread across the
+   frame, the grid tiles each return all symbols they contain, so the full set
+   is accumulated across tiles.
+5. **Grayscale + autocontrast + 2× upscale** — covers barcodes that ZXing can
+   locate but cannot pass checksum at native resolution. Upscaling gives the
+   decoder more pixels per module, recovering barcodes on small printed-label
+   stickers where individual modules would otherwise be too few pixels wide to
+   read reliably.
+
+Each stage is always run in full, regardless of whether earlier stages found
+something. A barcode text seen at an earlier stage is not re-added if the same
+text appears again at a later stage. The final `index` column numbers every
+unique barcode 1, 2, 3, … in the order it was first discovered across all
+stages.
+
+This five-stage accumulator recovers many barcodes that a single full-image
+pass would miss, including small embedded labels, high-resolution shots where
+the barcode card occupies only a fraction of the frame, and identity cards
+carrying multiple symbols (e.g. a scion code *and* a location code on the same
+card).
+
+## Diagnosing a specific image
+
+If an image that should have decoded did not, these functions help identify why:
+
+```r
+# Raw ZXing diagnostics — shows what the decoder saw, including
+# partial detections and checksum failures
+debug_zxing_read("N:/path/to/IMG_0042.JPG")
+
+# Try all crop regions and report which (if any) succeeded
+decode_hierarchical_zxing("N:/path/to/IMG_0042.JPG")
+
+# Simple single-image decode — returns one row per symbol found
+detect_codes_all_zxing("N:/path/to/IMG_0042.JPG")
+```
+
+`debug_zxing_read()` is the most informative starting point: it shows the raw
+output from ZXing including invalid candidates, error messages, and checksum
+states, making it easier to understand why a particular image failed.
+
+---
+
+# Common decoding problems and how they are handled
+
+## "No candidates" — barcode not located at all
+
+ZXing reports zero candidates when its finder pattern detector cannot locate
+any barcode-shaped region in the image at all. This is different from a
+checksum failure: the decoder never even got to the bit-reading stage.
+
+Common causes:
+
+- The barcode card is out of frame, severely out of focus, or physically damaged
+- The image is a plant photo with no card in frame (expected and normal)
+- The barcode is printed on a small sticker label, and even after upscaling
+  the module size is still too small for ZXing's finder heuristics
+- Glare, shadow, or extreme angle across the barcode surface
+
+**What the pipeline does:** if no candidate is found across all five decoder
+stages, a single row is written with `text = NA`. If the image follows a decoded
+card in sequence, it inherits that identity (`decode_status = "propagated"`).
+If there is no donor, it is marked `decode_status = "undecodable"` — it is
+never silently omitted from the output.
+
+**What was attempted for stubbornly undecodable images:**
+
+For images where a barcode is physically present but ZXing finds zero candidates,
+the following preprocessing variants were tested systematically before concluding
+the image is undecodable:
+
+| Approach | Variants tested |
+|---|---|
+| Colour space | RGB (native), greyscale |
+| Contrast | No preprocessing, autocontrast (PIL), histogram equalize (PIL) |
+| Sharpening | Unsharp mask (radius 1, percent 200, threshold 3) |
+| Upscaling | 1×, 2×, 3×, 4× (LANCZOS resampling) |
+| Region | Full image, centre-third crop, full-width centre-strip |
+| Rotation | 0°, 90°, 180°, 270° (in addition to EXIF auto-rotation) |
+
+All combinations were applied to the same image with the same ZXing settings
+(`try_rotate = TRUE`, `try_downscale = TRUE`). When every combination returns
+zero candidates, the conclusion is that the image quality is below the threshold
+at which ZXing's pattern finder can operate — no software-only fix is available
+without substantially different source material.
+
+> **Practical implication:** for images that reach `decode_status = "undecodable"`,
+> the correct action depends on context. If the image is a plant photo (no card
+> expected), the `"undecodable"` status simply records a sequence gap and the
+> image still has its full metadata (EXIF, file owner, GPS if available). If the
+> image *should* have had a readable card, the card itself likely needs to be
+> rephotographed closer or in better light.
+
+> **Potential future improvement:** OpenCV's CLAHE (Contrast Limited Adaptive
+> Histogram Equalization) applies local contrast stretching that can recover
+> barcodes in uneven lighting. Installing `opencv-python-headless` in the
+> `kiwidecoder-py` conda environment and adding a CLAHE pass before Stage 5
+> would be the most promising additional step to try for borderline images.
+> This has not yet been implemented because OpenCV is not included in the
+> base environment to keep the install footprint small.
+
+## "ChecksumError" — barcode found, but bits corrupted
+
+ZXing located the barcode and attempted to decode it, but the checksum did not
+match — meaning the bit pattern was read incorrectly. This happens when:
+
+- The barcode is a small printed-label sticker photographed on a high-resolution
+  camera. Each barcode module (black or white square) occupies very few pixels,
+  and ZXing's internal upscaling cannot recover enough detail to read every bit.
+- The barcode is partially in shadow or has specular reflection.
+- The image is slightly motion-blurred.
+
+**What the pipeline does:** Stage 5 — the 2× upscale pass — is specifically
+designed to recover these cases. The image is converted to grayscale,
+autocontrast is applied to maximise bit contrast, and the image is upscaled
+2× using Lanczos resampling. This doubles the pixel density per module and
+allows ZXing to resolve the checksum correctly.
+
+## Barcode near the edge of a crop boundary
+
+The original non-overlapping 3×3 grid could split a barcode across two tiles,
+with neither half containing enough of the symbol to decode. Stage 4 uses an
+overlapping sliding-window grid with 50% step size (≈ 25 tiles), so every
+point in the image is covered by at least two tiles and no barcode can fall
+entirely in a gap.
+
+## Sequence break — image with no barcode and no preceding card
+
+If a photographer takes a photo of something else between card photos (e.g. a
+close-up of fruit damage), the sequence break will be detected. The image is
+labelled `code_format = "unknown"` and `decode_status = "undecodable"` rather
+than inheriting from the previous card. This is intentional: the pipeline never
+silently propagates an identity across a gap.
+
+To find all undecodable images after processing:
+
+```r
+library(readr)
+df <- read_csv(file.path(image_root, "catalogue.csv"))
+df[df$decode_status == "undecodable", c("file_name", "dir", "decode_status")]
+```
+
+## Multiple barcodes on one card
+
+If a card carries both a scion code and a location code, ZXing returns both
+symbols. The pipeline produces one output row per symbol, so a single card
+image will produce two rows, both propagated to all following plant photos.
+
+## Identifying who took the photo
+
+iPhones and most cameras do not write the photographer's personal name into
+EXIF. See **§4.4 Step 4** for the full explanation of what `extract_image_metadata()`
+extracts and how to use `file_owner` and `camera_make`/`camera_model` as
+photographer proxies.
+
+---
+
+# Where output is stored
+
+## Index CSV files
+
+`scan_directories()` writes **one CSV per folder**, alongside the images it
+describes. For example:
+
+```
+N:/Trials/Flower_buds/2025/
+  Block_A/
+    Block_A.csv          ← index of images in Block_A
+    IMG_0041.JPG
+    IMG_0042.JPG
+    …
+  Block_B/
+    Block_B.csv
+    …
+```
+
+### Why one CSV per folder?
+
+This design was chosen deliberately for a collection of tens of thousands of
+images stored on a slow network drive. The key trade-offs are:
+
+| | One CSV per folder (this approach) | One monolithic root CSV |
+|---|---|---|
+| **Write speed** | Fast — each write touches only one folder's rows | Slow — every update reads and rewrites the entire file |
+| **Network safety** | A failed write corrupts only one folder's CSV | A failed write on the N: drive could corrupt every image record |
+| **Interrupted runs** | Natural checkpoints — finished folders are preserved on disk | Must track position manually; harder to resume |
+| **Parallel workers** | Each worker owns its own file; no locking conflicts | Concurrent writes require coordination to avoid corruption |
+| **Querying everything** | Requires `bind_rows` across many files at analysis time | Single read |
+
+On a network drive with tens of thousands of images, the per-folder approach
+means each write is small and fast, a network drop or interruption loses at
+most one folder's work, and multiple workers can decode in parallel without
+stepping on each other. The cost — reassembling all CSVs at analysis time — is
+a one-line operation:
+
+```r
+library(fs)
+library(readr)
+library(dplyr)
+
+all_images <- fs::dir_ls(image_root, regexp = "\\.csv$", recurse = TRUE) |>
+  purrr::map(readr::read_csv, show_col_types = FALSE) |>
+  dplyr::bind_rows()
+```
+
+`resolve_folder_sequence()` and `resolve_index_csv()` **enrich these same
+CSV files in place**, adding the decoded barcode and identity columns. The
+original scan columns are preserved; the barcode and biomaterial columns are
+appended.
+
+## The decode log
+
+`resolve_log.csv` is written to the root folder passed to
+`resolve_folder_sequence()`. It is **appended**, not overwritten, so running
+the decoder multiple times produces a complete history. Each row records one
+image: the timestamp, which index file was being processed, the image filename,
+and whether decoding succeeded.
+
+## The scan checkpoint
+
+`scan_checkpoint.rds` (written by `scan_directories()`) stores the list of
+folders already scanned. It allows the scan to resume from where it left off
+after an interruption. Once scanning is complete this file is not needed and
+can be deleted.
+
+## What happens when you re-run the pipeline
+
+Every function in the pipeline is designed to be **safe to re-run** — either
+on the same files (idempotency) or after new photos have been added to a folder
+(incremental update). The table below summarises the behaviour of each step:
+
+| Step | Re-run on same files | New files added to folder |
+|---|---|---|
+| `scan_directories()` | Skips already-scanned folders (checkpoint) | Rescan with `resume = FALSE` to pick up new files; index is merged safely |
+| `write_directory_index()` | Detects no new files → returns unchanged | Appends new file rows; existing decoded columns are preserved |
+| `resolve_folder_sequence()` | Detects all decoded → skips | Decodes only the new images; old decoded rows are kept intact |
+| `enrich_index_with_biomaterial()` | All rows have scion_name → skips | Looks up only the rows with NA scion_name |
+| `enrich_index_with_metadata()` | All rows have file_owner → skips | Extracts metadata only for rows with NA file_owner |
+
+**No decoded data is ever overwritten on a re-run.** The default across every
+function is `overwrite = FALSE`, which means:
+
+- already-decoded images are left alone,
+- already-enriched biomaterial rows are left alone,
+- already-enriched metadata rows are left alone.
+
+This is the safe default for production use. If you do need to force a full
+re-run for a specific step (e.g. after improving the decoding algorithm, or
+after database records have been updated), each function accepts
+`overwrite = TRUE`:
+
+```r
+resolve_folder_sequence(path = image_root, overwrite = TRUE)          # re-decodes all images
+enrich_index_with_biomaterial(path = image_root, con = con,
+                              overwrite = TRUE)                         # re-queries all codes
+enrich_index_with_metadata(path = image_root, overwrite = TRUE)       # re-extracts all EXIF
+```
+
+> **Warning — do not use `overwrite = TRUE` casually on the full image tree.**
+> On the N: drive collection (35,000+ images at roughly 12 seconds per image),
+> a full re-decode would take on the order of days. Use `overwrite = TRUE` on a
+> single test folder first to confirm the result is what you expect:
+>
+> ```r
+> resolve_index_csv("N:/Trials/.../Block_A/Block_A.csv", overwrite = TRUE)
+> ```
+>
+> Then run the full tree only once you are satisfied.
+
+### Picking up new files after a re-run
+
+When photos are added to an already-scanned folder:
+
+```r
+# Option 1: delete the scan checkpoint and rescan everything
+#   (write_directory_index() will merge new files without wiping old data)
+file.remove("scan_checkpoint.rds")
+scan_directories(root = image_root, resume = FALSE)
+
+# Option 2: update just one folder directly
+write_directory_index(
+  dir      = "N:/Trials/Flower_buds/2025/Block_A",
+  csv_path = "N:/Trials/Flower_buds/2025/Block_A/Block_A.csv"
+)
+
+# Then run the decode step — it will only process the new images
+resolve_folder_sequence(path = image_root)
+```
+
+### If a run is interrupted
+
+The pipeline is resumable at every step:
+
+- **`scan_directories()`** — restart with `resume = TRUE` (the default). It
+  reads `scan_checkpoint.rds` and skips folders already marked as done.
+- **`resolve_folder_sequence()`** — restart without any changes. It checks for
+  the `code_format` column in each CSV; folders already decoded are skipped
+  and only the unfinished ones are processed.
+- **`enrich_index_with_biomaterial()`** — restart without changes. Checks for
+  `scion_name`; rows already enriched are left alone.
+- **`enrich_index_with_metadata()`** — restart without changes. Checks for
+  `file_owner`; rows already enriched are left alone.
+
+In other words: once a step has finished writing to a CSV, that work is
+permanent. Restarting the pipeline after an interruption costs only the time
+for the work that was not yet completed.
+
+## Summary of output files
+
+| File | Written by | Content |
+|---|---|---|
+| `<folder>/<folder>.csv` | `scan_directories()` | Image index; enriched in-place by each subsequent pipeline step |
+| `resolve_log.csv` | `resolve_folder_sequence()` | Per-image decode log, appended on each run |
+| `scan_checkpoint.rds` | `scan_directories()` | Resume state for interrupted scans; can be deleted once scanning is complete |
+| `catalogue.csv` | `build_catalogue()` | All per-folder CSVs concatenated into one root-level file |
+
+All five pipeline steps write to the **same** per-folder CSV (Steps 1–4),
+then `build_catalogue()` (Step 5) assembles the final consolidated view.
+After all five steps the root directory contains `catalogue.csv` with all
+18 columns across every image in the collection.

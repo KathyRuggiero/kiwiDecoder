@@ -1,9 +1,9 @@
 #' Write Excel Index of Image Files in a Single Directory
 #'
 #' `write_directory_index()` lists image files in a single directory, applies
-#' extension and stem filtering, and writes the result to an Excel file.
+#' extension and stem filtering, and writes the result to a CSV file.
 #'
-#' The resulting workbook is designed to be a **stable per-directory index**
+#' The resulting CSV is designed to be a **stable per-directory index**
 #' of images and is the canonical input format for downstream decoding with
 #' [resolve_folder_sequence()]. In the typical workflow, these index files are
 #' generated automatically by [scan_directories()], but
@@ -11,32 +11,30 @@
 #' index a standalone folder or a small subset of the file tree.
 #'
 #' @param dir Character scalar. Directory to scan for image files.
-#' @param extensions Character vector of allowed image extensions. Defaults to
-#'   common formats such as `c("jpg", "jpeg", "png")`.
+#' @param extensions Character vector of allowed image extensions (case-insensitive).
+#'   Defaults to \code{c("jpg", "jpeg", "png", "heic")}. HEIC support requires the
+#'   \code{pillow-heif} Python package to be installed in the active conda environment.
 #' @param prefixes Optional character vector of regular expression patterns
 #'   matched against filename stems (without extensions). Use `NULL` or
 #'   `character(0)` to disable stem filtering and index all files with the
 #'   specified extensions.
-#' @param excel_path Full file path for the Excel file to be written. By
+#' @param csv_path Full file path for the CSV file to be written. By
 #'   convention, [scan_directories()] uses a filename that matches the
-#'   directory name (e.g. `"<subdir>/<subdir>.xlsx"`).
+#'   directory name (e.g. `"<subdir>/<subdir>.csv"`).
 #'
 #' @return
-#' Invisibly returns the data frame that is written to Excel. This data frame
-#' has one row per image file and typically includes:
+#' Invisibly returns the data frame that is written to CSV. This data frame
+#' has one row per image file and contains:
 #' \describe{
 #'   \item{dir}{Directory containing the image file.}
-#'   \item{subdir}{Basename of `dir`.}
 #'   \item{file_name}{Image filename (basename including extension).}
 #'   \item{ext}{Lowercased file extension (e.g., `"jpg"`, `"png"`).}
-#'   \item{rel_path}{Relative path to the image within `dir` (by default the
-#'     same as `file_name`).}
+#'   \item{full_path}{Normalised absolute path to the image file.}
 #' }
 #'
-#' These columns form the **structural index** that downstream functions use to
-#' locate and interpret images. In particular, [resolve_folder_sequence()]
-#' expects a sheet with at least `file_name`, and will use `full_path`,
-#' `rel_path`, `dir`, and `subdir` if they are present.
+#' These four columns form the **structural index** that downstream functions
+#' use to locate and interpret images. Each subsequent pipeline step adds its
+#' own columns to this base and writes the enriched result back to the same CSV.
 #'
 #' @details
 #' This helper is the low-level building block behind [scan_directories()]:
@@ -58,10 +56,15 @@
 #' @seealso
 #'   [scan_directories()] for depth-first indexing of an entire tree, and
 #'   [resolve_folder_sequence()] for decoding and resolving barcodes across
-#'   the Excel indexes produced by this function.
+#'   the CSV indexes produced by this function.
 #'
+#' @importFrom readr read_csv write_csv
+#' @importFrom dplyr bind_rows
 #' @export
-write_directory_index <- function(dir, extensions, prefixes, excel_path) {
+write_directory_index <- function(dir,
+                                  extensions = c("jpg", "jpeg", "png", "heic"),
+                                  prefixes   = NULL,
+                                  csv_path) {
   if (!dir.exists(dir)) return(invisible(NULL))
   
   files <- list.files(dir, full.names = TRUE, recursive = FALSE)
@@ -87,19 +90,29 @@ write_directory_index <- function(dir, extensions, prefixes, excel_path) {
   # Build data frame
   df <- data.frame(
     dir       = dirname(files),
-    subdir    = basename(dirname(files)),
     file_name = basename(files),
     ext       = tolower(tools::file_ext(files)),
-    rel_path  = basename(files),
+    full_path = normalizePath(files, winslash = "/", mustWork = FALSE),
     stringsAsFactors = FALSE
   )
   
   # Ensure directory exists for writing
-  out_dir <- dirname(excel_path)
+  out_dir <- dirname(csv_path)
   if (!dir.exists(out_dir)) dir.create(out_dir, recursive = TRUE)
-  
-  # Write Excel
-  writexl::write_xlsx(df, path = excel_path)
-  
+
+  # Merge with existing CSV so decoded columns are never overwritten.
+  # New files get one row appended; files already in the index are untouched.
+  if (file.exists(csv_path)) {
+    existing <- readr::read_csv(csv_path, show_col_types = FALSE)
+    new_rows  <- df[!df$file_name %in% existing$file_name, , drop = FALSE]
+    if (nrow(new_rows) == 0L) {
+      return(invisible(existing))
+    }
+    message("  Adding ", nrow(new_rows), " new file(s) to existing index.")
+    df <- dplyr::bind_rows(existing, new_rows)
+  }
+
+  readr::write_csv(df, file = csv_path)
+
   invisible(df)
 }

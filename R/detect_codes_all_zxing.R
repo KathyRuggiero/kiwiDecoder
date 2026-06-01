@@ -106,6 +106,14 @@ detect_codes_all_zxing <- function(path) {
     }
   )
   
+  # Register HEIC/HEIF support if pillow-heif is installed.
+  # This must be called before Image$open() so that PIL recognises .heic files.
+  # Silently ignored if pillow-heif is not available.
+  tryCatch({
+    ph <- reticulate::import("pillow_heif", convert = FALSE)
+    ph$register_heif_opener()
+  }, error = function(e) NULL)
+
   zxing <- tryCatch(
     reticulate::import("zxingcpp", convert = TRUE),
     error = function(e) {
@@ -197,9 +205,15 @@ detect_codes_all_zxing <- function(path) {
   if (nrow(tib) == 0L) {
     return(na_row)
   }
-  
+
+  # Deduplicate by text: try_rotate / try_downscale can cause ZXing to return
+  # the same physical barcode more than once.  Keep only the first occurrence
+  # and re-number index so it runs 1, 2, 3, … without gaps.
+  tib <- tib[!duplicated(tib$text), , drop = FALSE]
+  tib$index <- seq_len(nrow(tib))
+
   # Assign semantic type using internal classifier
   tib$type <- .classify_type(tib$text)
-  
+
   tib
 }

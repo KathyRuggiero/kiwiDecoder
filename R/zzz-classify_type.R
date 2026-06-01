@@ -30,26 +30,26 @@
 .classify_type <- function(x) {
   # x is a character vector
   x_clean <- ifelse(is.na(x), "", x)
-  
+
   # logical masks
   is_empty    <- x_clean == ""
   starts_SC   <- grepl("^SC", x_clean, ignore.case = TRUE)
   starts_RS   <- grepl("^RS", x_clean, ignore.case = TRUE)
   # letter + two digits for the first 3 chars
   is_location <- grepl("^[A-Za-z][0-9][0-9]", x_clean)
-  
+
   out <- rep(NA_character_, length(x_clean))
-  
+
   # Order of precedence:
   # 1) SC -> scion
   # 2) RS -> plant-genotype
   # 3) letter + 2 digits -> location
   # 4) other non-empty -> scion-genotype
-  
+
   out[!is_empty & starts_SC]         <- "scion"
   out[!is_empty & !starts_SC & starts_RS] <- "plant-genotype"
   out[!is_empty & !starts_SC & !starts_RS & is_location] <- "location"
   out[!is_empty & !starts_SC & !starts_RS & !is_location] <- "scion-genotype"
-  
+
   out
 }
