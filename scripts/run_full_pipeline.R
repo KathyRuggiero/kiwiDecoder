@@ -34,6 +34,23 @@ exifr::configure_exiftool(quiet = TRUE)
 # Everything underneath it will be scanned and decoded recursively.
 full_root <- "N:/Projects/Stage2 Clonal Trials/Images/A Auto-Naming"
 
+# ── Pre-flight checks ─────────────────────────────────────────────────────────
+# Abort immediately with a helpful message rather than failing mid-run.
+if (!dir.exists(full_root)) {
+  stop(
+    "\nCannot access the image root directory:\n  ", full_root,
+    "\n\nThe N:/ network drive is probably not mapped.",
+    "\nIn File Explorer: right-click 'This PC' → 'Map network drive' → N:",
+    "\nThen re-run this script.\n"
+  )
+}
+if (nchar(Sys.getenv("YUGABYTE_PW")) == 0L) {
+  warning(
+    "YUGABYTE_PW is not set in .Renviron — Steps 2 and 3 will skip DB lookups.",
+    "\nRun usethis::edit_r_environ(), add YUGABYTE_PW=<password>, save, and restart R."
+  )
+}
+
 # ── Log file ──────────────────────────────────────────────────────────────────
 # Progress messages are written to both the console and a timestamped log file
 # so you can check what happened in the morning without being at the machine.
@@ -99,10 +116,14 @@ plan(sequential)
 .log("Step 2 complete.")
 
 # ── Step 3: Biomaterial name lookup ───────────────────────────────────────────
-if (!is.null(con)) {
+# Re-use the connection from Step 2 if it is still open; otherwise reconnect.
+if (!is.null(con) && DBI::dbIsValid(con)) {
+  .log("Step 3: enriching with biomaterial names...")
+  enrich_index_with_biomaterial(path = full_root, con = con)
   tryCatch(dbDisconnect(con), error = function(e) NULL)
+  .log("Step 3 complete.")
 } else {
-  con2 <- tryCatch(
+  con3 <- tryCatch(
     dbConnect(
       RPostgres::Postgres(),
       host     = "a86e6e8c3e6f74590b0681a0128a39c3-76cf0d338a8ce628.elb.ap-southeast-2.amazonaws.com",
@@ -114,10 +135,10 @@ if (!is.null(con)) {
     ),
     error = function(e) { warning("No DB connection: ", e$message); NULL }
   )
-  if (!is.null(con2)) {
+  if (!is.null(con3)) {
     .log("Step 3: enriching with biomaterial names...")
-    enrich_index_with_biomaterial(path = full_root, con = con2)
-    dbDisconnect(con2)
+    enrich_index_with_biomaterial(path = full_root, con = con3)
+    dbDisconnect(con3)
     .log("Step 3 complete.")
   } else {
     .log("Step 3: skipped (no database connection).")
