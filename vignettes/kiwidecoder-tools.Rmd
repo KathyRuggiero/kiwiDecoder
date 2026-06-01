@@ -1042,6 +1042,15 @@ If `furrr` is not installed, `resolve_folder_sequence()` falls back silently to
 sequential processing — no code changes are needed, but the `plan()` call is
 then ignored.
 
+> **Note on parallel warnings:** You may previously have seen messages of the
+> form `UNRELIABLE VALUE: Future generated random numbers without specifying
+> argument 'seed'`. These arose because `tempfile()` — used internally to
+> create temporary image crops — generates random numbers, and `future`
+> flagged these as potentially non-reproducible across workers. The underlying
+> barcode results were never affected. This warning has been silenced by
+> passing `seed = TRUE` to `furrr_options()`, which enables parallel-safe
+> random number streams across workers.
+
 ## Step 4 — Enrich index files with photo metadata (optional)
 
 `enrich_index_with_metadata()` reads every index CSV under `image_root`,
@@ -1113,6 +1122,19 @@ for phone cameras. The best available approach is:
 
 If GPS was on, `GPSLatitude` / `GPSLongitude` can confirm the image was taken
 at the expected trial site.
+
+**How `file_owner` is extracted:**
+
+On Windows, `file_owner` is retrieved using the `dir /Q` command, which
+reports the file-system owner (e.g. `PFR\mike.currie`) for every file in a
+folder. `kiwiDecoder` runs this command once per *folder* rather than once
+per *file*, so the number of network round-trips equals the number of
+subfolders — typically ~20 for a standard session — rather than the number
+of images (~4,400). The domain prefix (e.g. `PFR\`) is stripped so the
+column contains only the username (e.g. `mike.currie`).
+
+On non-Windows systems `file_owner` is retrieved via `fs::file_info()` and
+will be `NA` if the `fs` package is not installed.
 
 ## Step 5 — Build a root-level catalogue
 
