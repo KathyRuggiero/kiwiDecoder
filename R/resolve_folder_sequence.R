@@ -87,7 +87,6 @@
 #'   [safe_write_xlsx()]
 #'
 #' @importFrom readr read_csv write_csv
-#' @importFrom utils write.table
 #' @importFrom dplyr bind_rows group_by summarise arrange left_join
 #' @importFrom tibble tibble
 #' @export
@@ -246,7 +245,7 @@ resolve_folder_sequence <- function(path, pattern = "\\.csv$", con = NULL,
       furrr::future_map(
         seq_len(n_images),
         decode_one,
-        .options = furrr::furrr_options(packages = "kiwiDecoder")
+        .options = furrr::furrr_options(packages = "kiwiDecoder", seed = TRUE)
       )
     } else {
       lapply(seq_len(n_images), decode_one)
@@ -255,15 +254,10 @@ resolve_folder_sequence <- function(path, pattern = "\\.csv$", con = NULL,
     decoded   <- lapply(decode_results, `[[`, "decoded_tbl")
     log_batch <- dplyr::bind_rows(lapply(decode_results, `[[`, "log_entry"))
 
-    # Write entire batch at once (one file open/close per CSV, not per image)
-    write.table(
-      log_batch,
-      file      = log_file,
-      append    = TRUE,
-      sep       = ",",
-      col.names = !file.exists(log_file),
-      row.names = FALSE
-    )
+    # Write entire batch at once (one file open/close per CSV, not per image).
+    # readr::write_csv with append = file.exists() correctly omits column names
+    # on subsequent writes without triggering R's "appending column names" warning.
+    readr::write_csv(log_batch, log_file, append = file.exists(log_file))
 
     long_df_new <- dplyr::bind_rows(decoded)
 
