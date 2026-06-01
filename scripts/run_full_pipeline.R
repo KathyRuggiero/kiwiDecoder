@@ -37,23 +37,19 @@ full_root <- "N:/Projects/Stage2 Clonal Trials/Images/A Auto-Naming"
 # ── Log file ──────────────────────────────────────────────────────────────────
 # Progress messages are written to both the console and a timestamped log file
 # so you can check what happened in the morning without being at the machine.
+# The log is stored locally (in the package folder) rather than on N:/ to avoid
+# file-connection issues with network drives.
 log_path <- file.path(
-  full_root,
+  pkg_dir,
   paste0("pipeline_log_", format(Sys.time(), "%Y%m%d_%H%M%S"), ".txt")
 )
-log_con <- file(log_path, open = "wt")
 message("Progress log: ", log_path)
 
 .log <- function(...) {
   msg <- paste0(format(Sys.time()), " | ", ...)
-  message(msg)              # console
-  writeLines(msg, log_con)  # log file
-  flush(log_con)
+  message(msg)                                          # console
+  cat(msg, "\n", file = log_path, append = TRUE)       # log file (open/close each write — robust on all drives)
 }
-
-on.exit({
-  close(log_con)
-}, add = TRUE)
 
 # ── Sleep prevention ──────────────────────────────────────────────────────────
 # Attempt to disable AC sleep via powercfg. This may silently fail if your
