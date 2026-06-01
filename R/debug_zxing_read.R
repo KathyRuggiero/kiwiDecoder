@@ -68,7 +68,7 @@ debug_zxing_read <- function(path) {
     }
   )
   if (is.null(Image) || is.null(zxing)) {
-    message("Python modules missing; install pillow + zxingcpp.")
+    message("Python modules missing. Run setup_kiwidecoder_env() or install manually: pip install pillow zxing-cpp pillow-heif")
     return(invisible(NULL))
   }
 

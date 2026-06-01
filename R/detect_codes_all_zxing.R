@@ -119,7 +119,7 @@ detect_codes_all_zxing <- function(path) {
     error = function(e) {
       warning(
         "Failed to import Python module 'zxingcpp'. ",
-        "Check that the 'zxingcpp' Python package is installed in the active Python environment. (",
+        "Install it with: pip install zxing-cpp  (note: PyPI name uses a hyphen). (",
         conditionMessage(e), ")"
       )
       NULL

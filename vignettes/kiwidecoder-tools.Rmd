@@ -284,7 +284,7 @@ again — `kiwiDecoder` loads them automatically every time it needs them.
 | Package | What it is | Why it is needed |
 |---|---|---|
 | **Pillow** (also called PIL — Python Imaging Library) | Python's standard image-reading library | Opens image files so they can be passed to the barcode reader |
-| **zxingcpp** | Python wrapper around the ZXing-CPP barcode engine | The actual barcode and QR code reader |
+| **zxing-cpp** (pip install name: `zxing-cpp`; Python import name: `zxingcpp`) | Python wrapper around the ZXing-CPP barcode engine | The actual barcode and QR code reader |
 | **pillow-heif** | A plugin that adds HEIC/HEIF support to Pillow | Lets Pillow open `.HEIC` photos from iPhones (see §3.8) |
 
 **How the packages are loaded — and what you need to do**
@@ -345,43 +345,46 @@ minimal version that is all you need. Download and install it from:
 Accept all the default options during installation. Restart RStudio afterwards
 so R can find the new installation.
 
-**Step 2 — Create the `kiwidecoder-py` environment**
+**Step 2 — Create the environment and install Python packages**
 
-Run this in your R console (once only):
-
-```r
-library(reticulate)
-
-reticulate::conda_create("kiwidecoder-py")
-```
-
-This creates a new, empty Python environment named `kiwidecoder-py`. It takes
-a minute or two while conda sets up the base Python installation.
-
-**Step 3 — Install the required Python packages**
+The simplest way is to use the built-in setup function, which handles
+everything automatically:
 
 ```r
-reticulate::use_condaenv("kiwidecoder-py", required = TRUE)
-
-reticulate::py_install(
-  packages = c("pillow", "zxingcpp", "pillow-heif"),
-  envname  = "kiwidecoder-py",
-  pip      = TRUE
-)
+library(kiwiDecoder)
+setup_kiwidecoder_env()
 ```
 
-`pip` is Python's package installer (similar to `install.packages()` in R).
-The `pip = TRUE` argument tells conda to use pip for these packages because
-they are not available in the main conda package repository.
+This will:
 
-**Step 4 — Verify the installation**
+1. Create the `kiwidecoder-py` conda environment (Python 3.11 by default)
+2. Upgrade pip inside it to the latest version
+3. Install `pillow`, `zxing-cpp`, and `pillow-heif`
+4. Verify that all three can be imported correctly
+
+If you prefer to run the steps manually, the equivalent commands are:
+
+```r
+reticulate::conda_create("kiwidecoder-py", python_version = "3.11")
+
+python <- reticulate::conda_python(envname = "kiwidecoder-py")
+system2(python, c("-m", "pip", "install", "--upgrade", "pip"))
+system2(python, c("-m", "pip", "install", "pillow", "zxing-cpp", "pillow-heif"))
+```
+
+> **Note on the package name:** The barcode-reading package is installed from
+> PyPI as `zxing-cpp` (with a hyphen) but imported inside Python as `zxingcpp`
+> (no hyphen). This is a quirk of how the package is published — `kiwiDecoder`
+> handles it transparently and you do not need to do anything differently.
+
+**Step 3 — Verify the installation**
 
 ```r
 reticulate::py_config()
 ```
 
 This prints a summary of which Python is active and which packages it can find.
-You should see `kiwidecoder-py` in the path and `pillow`, `zxingcpp`, and
+You should see `kiwidecoder-py` in the path and `pillow`, `zxing-cpp`, and
 `pillow-heif` listed as available.
 
 **What to do at the start of each R session**
@@ -403,8 +406,8 @@ every time R starts.
 > stop with an error rather than silently falling back to the wrong environment.
 
 > **Troubleshooting — packages missing:** If `py_config()` shows `pillow`,
-> `zxingcpp`, or `pillow-heif` as not found, re-run the `py_install()` call
-> in Step 3 above.
+> `zxing-cpp`, or `pillow-heif` as not found, re-run `setup_kiwidecoder_env()`
+> or the manual pip install commands in Step 2 above.
 
 ## ImageMagick — what it is and how it is installed
 
