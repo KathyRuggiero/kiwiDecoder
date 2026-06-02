@@ -84,10 +84,11 @@ if (sleep_ok) {
 # ── Step 1: Scan directories ──────────────────────────────────────────────────
 .log("Step 1: scanning directories...")
 scan_directories(
-  root       = full_root,
-  extensions = c("jpg", "jpeg", "png", "heic"),
-  prefixes   = NULL,
-  resume     = TRUE
+  root            = full_root,
+  extensions      = c("jpg", "jpeg", "png", "heic"),
+  prefixes        = NULL,
+  resume          = TRUE,
+  checkpoint_file = file.path(pkg_dir, "scan_checkpoint.rds")
 )
 .log("Step 1 complete.")
 
