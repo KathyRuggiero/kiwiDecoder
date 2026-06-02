@@ -898,11 +898,14 @@ So the first CSV written will be in the first alphabetical leaf folder that
 contains images (e.g. `1 Female Photos/2020_21_or_older/2020_21_or_older.csv`).
 Watch for that file in File Explorer to confirm the scan is writing correctly.
 
-> **Running as a background job:** the progress bar does not render in
-> RStudio's Background Jobs pane (it uses `\r` line-overwrite which the pane
-> does not support). Run the pipeline via `source("scripts/launch_pipeline.R")`
-> and monitor progress by watching for CSV files appearing in the image folders
-> on N:/, or by reading the timestamped log file written to the package folder.
+> **Running as a background job:** the progress bar renders correctly in
+> RStudio's Background Jobs pane. However, it does not print a message for each
+> individual folder — it simply advances as each directory is processed. This is
+> by design: Step 1 is a file-system scan, not an image decoder, so the only
+> useful progress signal is the bar itself. Run the pipeline via
+> `source("scripts/launch_pipeline.R")` and watch the bar in the Background Jobs
+> tab; CSV files will begin appearing in the image folders on N:/ once the scan
+> reaches the first leaf folder containing images.
 
 To index a single folder manually:
 
