@@ -98,16 +98,20 @@ resolve_folder_sequence <- function(path, pattern = "\\.csv$", con = NULL,
   }
 
   # -------------------------------------------------------------------------
-  # Discover workbook files
+  # Discover index CSV files
   # -------------------------------------------------------------------------
-  csv_files <- list.files(path, pattern = pattern, full.names = TRUE)
-  if (length(csv_files) == 0L) {
-    csv_files <- list.files(path, pattern = pattern, recursive = TRUE, full.names = TRUE)
-  }
+  # Always scan recursively so we reach leaf folders under a deep root.
+  csv_files <- list.files(path, pattern = pattern, recursive = TRUE, full.names = TRUE)
 
-  # exclude scan/resolve log files and the root catalogue
-  csv_files <- csv_files[!basename(csv_files) %in%
-                           c("resolve_log.csv", "scan_log.csv", "catalogue.csv")]
+  # Keep only CSVs produced by write_directory_index().  The naming
+  # convention is that each index CSV's filename stem matches its parent
+  # folder name — e.g. "Phil Copy/Phil Copy.csv".  This automatically
+  # excludes log files (resolve_log.csv, scan_log.csv), catalogue.csv,
+  # heartbeat files, and any other incidental CSV in the tree, without
+  # needing a hard-coded exclusion list.
+  csv_files <- csv_files[
+    tools::file_path_sans_ext(basename(csv_files)) == basename(dirname(csv_files))
+  ]
 
   if (length(csv_files) == 0L) {
     stop("No CSV index files found in: ", path)
