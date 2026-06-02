@@ -864,6 +864,46 @@ scan_directories(
 | `prefixes` | Regex patterns matched against the filename stem — images not matching any pattern are skipped |
 | `dry_run = TRUE` | Scan without writing files — useful for checking what would be indexed |
 
+**What you see while Step 1 runs:**
+
+```
+2026-06-02 12:51:32 | Step 1: scanning directories...
+  |==                                                           |   2%
+  |=======                                                      |  10%
+  |==============                                               |  20%
+  ...
+```
+
+There are two things that may look surprising:
+
+1. **There is a delay before the progress bar appears.** Before the loop can
+   start, `scan_directories()` calls `list.dirs()` to enumerate *every*
+   directory in the entire tree. On a large collection stored on a network
+   drive, this initial enumeration can take **5–15 minutes** with no visible
+   output. The progress bar only appears once enumeration is complete and the
+   loop begins. This is normal — just wait.
+
+2. **CSV files do not appear for every tick of the bar.** The progress bar
+   counts *all* directories in the tree, including intermediate parent folders
+   (e.g. `1 Female Photos/`, `2021_22/`) that contain only subfolders and no
+   image files directly. These scan instantly and produce no CSV. A CSV is
+   written only when a folder **directly contains** image files with a matching
+   extension. On a deeply nested collection the bar may advance past 20–30%
+   before the first CSV appears — this is expected, not a sign that something
+   is wrong.
+
+The scan processes folders **alphabetically and depth-first**: it completes the
+entire subtree under the first alphabetical subfolder before moving to the next.
+So the first CSV written will be in the first alphabetical leaf folder that
+contains images (e.g. `1 Female Photos/2020_21_or_older/2020_21_or_older.csv`).
+Watch for that file in File Explorer to confirm the scan is writing correctly.
+
+> **Running as a background job:** the progress bar does not render in
+> RStudio's Background Jobs pane (it uses `\r` line-overwrite which the pane
+> does not support). Run the pipeline via `source("scripts/launch_pipeline.R")`
+> and monitor progress by watching for CSV files appearing in the image folders
+> on N:/, or by reading the timestamped log file written to the package folder.
+
 To index a single folder manually:
 
 ```r
