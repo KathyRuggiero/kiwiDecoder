@@ -3,6 +3,11 @@ title: "`kiwiDecoder`: Decoding Barcodes in Clonal Trial Images"
 author: "Kathy Ruggiero"
 date: "`r format(Sys.Date(), '%d %B %Y')`"
 output:
+  pdf_document:
+    number_sections: true
+    toc: false          # TOC placed manually below for correct pagination
+    toc_depth: 3
+    latex_engine: xelatex
   html_document:
     theme: cosmo
     number_sections: true
@@ -10,19 +15,32 @@ output:
     toc_float:
       collapsed: false
       smooth_scroll: true
-  pdf_document:
-    number_sections: true
-    toc: true
-    toc_depth: 3
-    latex_engine: xelatex
+header-includes:
+  # \cleartooddpage: ends the current page, then adds a blank page only if
+  # the next page would be even — ensuring content always starts on an odd
+  # (right-hand) page.  Used after the TOC in PDF output.
+  - \newcommand{\cleartooddpage}{\clearpage\ifodd\value{page}\else\null\thispagestyle{empty}\clearpage\fi}
 vignette: >
   %\VignetteIndexEntry{End-to-End Workflow for Barcode Decoding in Clonal Trials}
-  %\VignetteEngine{knitr::rmarkdown}
   %\VignetteEncoding{UTF-8}
+  %\VignetteEngine{knitr::rmarkdown}
 ---
 
 ```{r setup, include=FALSE}
 knitr::opts_chunk$set(echo = TRUE, eval = FALSE)
+```
+
+```{=latex}
+% PDF pagination:
+%   Page 1  — title / author / date  (placed by \maketitle before body)
+%   Page 2  — intentionally blank
+%   Page 3+ — table of contents
+%   Next odd page — document content begins
+\clearpage
+\null\thispagestyle{empty}
+\clearpage
+\tableofcontents
+\cleartooddpage
 ```
 
 # What this tool does
