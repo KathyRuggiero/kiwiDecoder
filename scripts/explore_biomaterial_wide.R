@@ -1,4 +1,4 @@
-library(DBI)
+﻿library(DBI)
 library(dplyr)
 
 yogicon <- dbConnect(
@@ -7,7 +7,7 @@ yogicon <- dbConnect(
   port     = 5433,
   dbname   = "kup_obs_comp_prod",
   user     = "kup_ro",
-  password = Sys.getenv("YUGABYTE_PW"),   # store password in .Renviron — never hardcode
+  password = Sys.getenv("KUP_DB_PASSWORD"),   # store password in .Renviron â€” never hardcode
   sslmode  = "disable",
   options  = "-c tcp_keepalives_idle=60 -c tcp_keepalives_interval=20 -c tcp_keepalives_count=5"
 )
@@ -22,7 +22,7 @@ for (col in names(sample_rows)) {
   cat(sprintf("  %-40s : %s\n", col, paste(sample_rows[[col]], collapse = " | ")))
 }
 
-cat("\n=== Look for C.9xxxx pattern — rows where any text column matches ===\n")
+cat("\n=== Look for C.9xxxx pattern â€” rows where any text column matches ===\n")
 # Try to find where C.91606 or similar codes appear
 search_result <- dbGetQuery(yogicon, "
   SELECT *

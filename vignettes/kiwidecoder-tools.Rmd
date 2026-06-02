@@ -753,7 +753,7 @@ usethis::edit_r_environ()
 In the file that opens, add:
 
 ```
-YUGABYTE_PW=<password from interact-with-yugabyte.R>
+KUP_DB_PASSWORD=<password from interact-with-yugabyte.R>
 ```
 
 Save and restart R. The password is now available in any R session without
@@ -771,7 +771,7 @@ con <- dbConnect(
   port     = 5433,
   dbname   = "kup_obs_comp_prod",
   user     = "kup_ro",
-  password = Sys.getenv("YUGABYTE_PW"),
+  password = Sys.getenv("KUP_DB_PASSWORD"),
   sslmode  = "disable"
 )
 ```
@@ -798,7 +798,7 @@ the lookup step and disconnect as soon as it finishes.
 | Symptom | Likely cause | Fix |
 |---|---|---|
 | `could not connect to server` | Not on the KBC network or VPN | Connect to VPN first |
-| `password authentication failed` | Wrong password in `.Renviron` | Check `Sys.getenv("YUGABYTE_PW")` returns the right value |
+| `password authentication failed` | Wrong password in `.Renviron` | Check `Sys.getenv("KUP_DB_PASSWORD")` returns the right value |
 | `SSL connection has been closed unexpectedly` | Long-idle connection timed out | Reconnect with `dbConnect(...)` and retry |
 | `lookup_biomaterial_name() failed` printed as a warning | Connection dropped mid-run | Same — reconnect |
 | Columns `scion_name` etc. all NA | Codes not found in database | Normal for M-prefix males and unregistered codes; check `lookup_biomaterial_name(code, con)` interactively |

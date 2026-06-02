@@ -1,17 +1,17 @@
-pkg_dir  <- "C:/Users/Kathy.Ruggiero/OneDrive - The Kiwifruit Breeding Centre/Documents/kbc/projects/other/my-r-packages/kiwiDecoder"
+﻿pkg_dir  <- "C:/Users/Kathy.Ruggiero/OneDrive - The Kiwifruit Breeding Centre/Documents/kbc/projects/other/my-r-packages/kiwiDecoder"
 test_dir <- "N:/Projects/Stage2 Clonal Trials/Images/A Auto-Naming/test_folder"
 test_csv <- file.path(test_dir, "pipeline_test.csv")
 
 setwd(pkg_dir)
 devtools::load_all(quiet = TRUE)
 
-# ── 1. Count image files ───────────────────────────────────────────────────
+# â”€â”€ 1. Count image files â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 imgs <- list.files(test_dir,
                    pattern    = "\\.(jpg|jpeg|png)$",
                    ignore.case = TRUE)
 cat("Images in test_folder:", length(imgs), "\n\n")
 
-# ── Step 1: write_directory_index ──────────────────────────────────────────
+# â”€â”€ Step 1: write_directory_index â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 cat("=== Step 1: write_directory_index ===\n")
 if (file.exists(test_csv)) file.remove(test_csv)   # fresh run each time
 t1 <- system.time(
@@ -24,14 +24,14 @@ t1 <- system.time(
 )
 cat(sprintf("done in %.1f sec\n\n", t1["elapsed"]))
 
-# ── Step 2: resolve_index_csv (decode + propagate) ────────────────────────
+# â”€â”€ Step 2: resolve_index_csv (decode + propagate) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 cat("=== Step 2: resolve_index_csv ===\n")
 t2 <- system.time(
   result <- resolve_index_csv(test_csv)
 )
 cat(sprintf("done in %.1f sec\n\n", t2["elapsed"]))
 
-# ── Step 3: enrich with biomaterial identity ──────────────────────────────
+# â”€â”€ Step 3: enrich with biomaterial identity â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 cat("=== Step 3: enrich_one_index_with_biomaterial ===\n")
 library(DBI)
 library(RPostgres)
@@ -43,7 +43,7 @@ con <- tryCatch(
     port     = 5433,
     dbname   = "kup_obs_comp_prod",
     user     = "kup_ro",
-    password = Sys.getenv("YUGABYTE_PW"),   # store in .Renviron — never hardcode
+    password = Sys.getenv("KUP_DB_PASSWORD"),   # store in .Renviron â€” never hardcode
     sslmode  = "disable"
   ),
   error = function(e) {
@@ -63,14 +63,14 @@ if (!is.null(con)) {
   cat("  Skipped (no database connection)\n\n")
 }
 
-# ── Step 4: enrich with EXIF metadata ─────────────────────────────────────
+# â”€â”€ Step 4: enrich with EXIF metadata â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 cat("=== Step 4: enrich_one_index_with_metadata ===\n")
 t4 <- system.time(
   result <- enrich_one_index_with_metadata(test_csv)
 )
 cat(sprintf("done in %.1f sec\n\n", t4["elapsed"]))
 
-# ── Results summary ────────────────────────────────────────────────────────
+# â”€â”€ Results summary â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 cat("=== Final output ===\n")
 cat("Rows:", nrow(result), "  Columns:", ncol(result), "\n")
 cat("Column names:\n  ", paste(names(result), collapse = "\n   "), "\n\n")

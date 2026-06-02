@@ -1,4 +1,4 @@
-# ── scripts/run_one_hour_demo.R ─────────────────────────────────────────────────
+﻿# â”€â”€ scripts/run_one_hour_demo.R â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 # Full 5-step pipeline demo on "2 Male photos" (~4,400 images; approx. 1 hour).
 #
 # Run this script interactively from within the kiwiDecoder project directory,
@@ -10,11 +10,11 @@
 #
 # Pre-requisites
 # --------------
-# * Set YUGABYTE_PW in .Renviron (Sys.getenv("YUGABYTE_PW") must return the
-#   password — never paste it directly in this script).
+# * Set KUP_DB_PASSWORD in .Renviron (Sys.getenv("KUP_DB_PASSWORD") must return the
+#   password â€” never paste it directly in this script).
 # * pillow-heif must be installed in the conda environment:
 #     reticulate::py_install("pillow-heif", pip = TRUE)   # run once
-# ────────────────────────────────────────────────────────────────────────────────
+# â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 # pkg_dir must be defined first so we can build an absolute path to renv/activate.R,
 # which makes the source() call safe regardless of the current working directory.
@@ -31,11 +31,11 @@ library(RPostgres)
 # copy of ExifTool lives so subsequent loads skip the search).
 exifr::configure_exiftool(quiet = TRUE)
 
-# "2 Male photos" — ~4,400 images (JPEG + HEIC), barcodes present; fits in ~1 h.
+# "2 Male photos" â€” ~4,400 images (JPEG + HEIC), barcodes present; fits in ~1 h.
 # Switch demo_root to any other top-level subfolder of A Auto-Naming if desired.
 demo_root <- "N:/Projects/Stage2 Clonal Trials/Images/A Auto-Naming/2 Male photos"
 
-# ── Step 1: index every subfolder (fast — no image decoding) ──────────────────
+# â”€â”€ Step 1: index every subfolder (fast â€” no image decoding) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 cat(format(Sys.time()), "| Step 1: scanning directories...\n")
 scan_directories(
   root       = demo_root,
@@ -45,10 +45,10 @@ scan_directories(
 )
 cat(format(Sys.time()), "| Step 1 complete.\n\n")
 
-# ── Step 2: decode barcodes in parallel ───────────────────────────────────────
+# â”€â”€ Step 2: decode barcodes in parallel â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 # Worker count strategy:
-#   - parallel::detectCores(logical = FALSE)  → physical cores only (conservative)
-#   - parallel::detectCores() - 1L            → logical cores minus 1 (more aggressive;
+#   - parallel::detectCores(logical = FALSE)  â†’ physical cores only (conservative)
+#   - parallel::detectCores() - 1L            â†’ logical cores minus 1 (more aggressive;
 #                                               useful when images are on a network drive
 #                                               because I/O waits free up CPU for other workers)
 # On this machine (Intel i7-1165G7): 4 physical / 8 logical cores.
@@ -66,7 +66,7 @@ con <- tryCatch(
     port     = 5433,
     dbname   = "kup_obs_comp_prod",
     user     = "kup_ro",
-    password = Sys.getenv("YUGABYTE_PW"),   # store password in .Renviron — never hardcode
+    password = Sys.getenv("KUP_DB_PASSWORD"),   # store password in .Renviron â€” never hardcode
     sslmode  = "disable"
   ),
   error = function(e) { warning("No DB connection: ", e$message); NULL }
@@ -76,7 +76,7 @@ resolve_folder_sequence(path = demo_root, con = con)
 plan(sequential)
 cat(format(Sys.time()), "| Step 2 complete.\n\n")
 
-# ── Step 3: biomaterial lookup (if Step 2 ran without a connection) ────────────
+# â”€â”€ Step 3: biomaterial lookup (if Step 2 ran without a connection) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 # If con was not NULL, the biomaterial lookup was already done inside
 # resolve_folder_sequence() in Step 2. Just disconnect.
 # If con was NULL (DB unreachable), attempt a fresh connection for a standalone lookup.
@@ -90,7 +90,7 @@ if (!is.null(con)) {
       port     = 5433,
       dbname   = "kup_obs_comp_prod",
       user     = "kup_ro",
-      password = Sys.getenv("YUGABYTE_PW"),
+      password = Sys.getenv("KUP_DB_PASSWORD"),
       sslmode  = "disable"
     ),
     error = function(e) { warning("No DB connection: ", e$message); NULL }
@@ -105,20 +105,20 @@ if (!is.null(con)) {
   }
 }
 
-# ── Step 4: EXIF / GPS metadata ───────────────────────────────────────────────
+# â”€â”€ Step 4: EXIF / GPS metadata â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 cat(format(Sys.time()), "| Step 4: extracting photo metadata (ExifTool)...\n")
 enrich_index_with_metadata(path = demo_root)
 cat(format(Sys.time()), "| Step 4 complete.\n\n")
 
-# ── Step 5: build master catalogue ────────────────────────────────────────────
+# â”€â”€ Step 5: build master catalogue â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 cat(format(Sys.time()), "| Step 5: building catalogue.csv...\n")
 cat_out <- build_catalogue(root = demo_root)
 cat(format(Sys.time()), "| Done.\n")
 cat("catalogue.csv written to:", file.path(demo_root, "catalogue.csv"), "\n")
 cat("Total rows in catalogue:", nrow(cat_out), "\n")
 
-# ── Quick summary for boss presentation ───────────────────────────────────────
-cat("\n── Summary ─────────────────────────────────────────────────────────────\n")
+# â”€â”€ Quick summary for boss presentation â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+cat("\nâ”€â”€ Summary â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€\n")
 n_total      <- nrow(cat_out)
 # decode_status breakdown (decode_status column added by resolve_folder_sequence)
 n_decoded    <- if ("decode_status" %in% names(cat_out))
@@ -140,4 +140,4 @@ cat(sprintf("  Scion name resolved      : %d  (%.0f%%)\n",
             n_scion,       100 * n_scion       / max(n_total, 1)))
 cat(sprintf("  Images with GPS          : %d  (%.0f%%)\n",
             n_gps,         100 * n_gps         / max(n_total, 1)))
-cat("────────────────────────────────────────────────────────────────────────\n")
+cat("â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€\n")

@@ -13,7 +13,7 @@
 #
 # Pre-requisites
 # --------------
-# * YUGABYTE_PW set in .Renviron  (usethis::edit_r_environ())
+# * KUP_DB_PASSWORD set in .Renviron  (usethis::edit_r_environ())
 # * kiwidecoder-py conda environment set up  (setup_kiwidecoder_env())
 # * N:/ drive mapped and accessible
 # ─────────────────────────────────────────────────────────────────────────────
@@ -44,10 +44,10 @@ if (!dir.exists(full_root)) {
     "\nThen re-run this script.\n"
   )
 }
-if (nchar(Sys.getenv("YUGABYTE_PW")) == 0L) {
+if (nchar(Sys.getenv("KUP_DB_PASSWORD")) == 0L) {
   warning(
-    "YUGABYTE_PW is not set in .Renviron — Steps 2 and 3 will skip DB lookups.",
-    "\nRun usethis::edit_r_environ(), add YUGABYTE_PW=<password>, save, and restart R."
+    "KUP_DB_PASSWORD is not set in .Renviron — Steps 2 and 3 will skip DB lookups.",
+    "\nRun usethis::edit_r_environ(), add KUP_DB_PASSWORD=<password>, save, and restart R."
   )
 }
 
@@ -106,7 +106,7 @@ con <- tryCatch(
     port     = 5433,
     dbname   = "kup_obs_comp_prod",
     user     = "kup_ro",
-    password = Sys.getenv("YUGABYTE_PW"),   # never hardcode — store in .Renviron
+    password = Sys.getenv("KUP_DB_PASSWORD"),   # never hardcode — store in .Renviron
     sslmode  = "disable"
   ),
   error = function(e) { warning("No DB connection: ", e$message); NULL }
@@ -131,7 +131,7 @@ if (!is.null(con) && DBI::dbIsValid(con)) {
       port     = 5433,
       dbname   = "kup_obs_comp_prod",
       user     = "kup_ro",
-      password = Sys.getenv("YUGABYTE_PW"),
+      password = Sys.getenv("KUP_DB_PASSWORD"),
       sslmode  = "disable"
     ),
     error = function(e) { warning("No DB connection: ", e$message); NULL }

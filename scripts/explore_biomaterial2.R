@@ -1,4 +1,4 @@
-library(DBI)
+﻿library(DBI)
 
 yogicon <- dbConnect(
   RPostgres::Postgres(),
@@ -6,7 +6,7 @@ yogicon <- dbConnect(
   port     = 5433,
   dbname   = "kup_obs_comp_prod",
   user     = "kup_ro",
-  password = Sys.getenv("YUGABYTE_PW"),   # store password in .Renviron — never hardcode
+  password = Sys.getenv("KUP_DB_PASSWORD"),   # store password in .Renviron â€” never hardcode
   sslmode  = "disable",
   options  = "-c tcp_keepalives_idle=60 -c tcp_keepalives_interval=20 -c tcp_keepalives_count=5"
 )
