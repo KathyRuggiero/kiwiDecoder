@@ -1,7 +1,7 @@
 ---
 title: "`kiwiDecoder`: Decoding Barcodes in Clonal Trial Images"
 author: "Kathy Ruggiero"
-date: "`r Sys.Date()`"
+date: "`r format(Sys.Date(), '%d %B %Y')`"
 output:
   html_document:
     theme: cosmo
@@ -10,6 +10,11 @@ output:
     toc_float:
       collapsed: false
       smooth_scroll: true
+  pdf_document:
+    number_sections: true
+    toc: true
+    toc_depth: 3
+    latex_engine: xelatex
 vignette: >
   %\VignetteIndexEntry{End-to-End Workflow for Barcode Decoding in Clonal Trials}
   %\VignetteEngine{knitr::rmarkdown}
