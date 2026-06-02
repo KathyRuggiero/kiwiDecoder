@@ -93,7 +93,12 @@ scan_directories <- function(
       next
     }
 
-    # Write directory index unless dry_run
+    # Write directory index unless dry_run.
+    # write_ok tracks whether the write succeeded so we only mark a directory
+    # as "done" in the checkpoint if its CSV was actually written.  A directory
+    # with no matching files returns NULL (not an error) — that also counts as
+    # success so it won't be redundantly re-scanned on resume.
+    write_ok <- dry_run   # dry_run: nothing to write, counts as success
     if (!dry_run) {
       tryCatch({
         write_directory_index(
@@ -102,13 +107,20 @@ scan_directories <- function(
           prefixes   = prefixes,
           csv_path   = csv_path
         )
+        write_ok <- TRUE
       }, error = function(e) {
         warning("Failed to write CSV index for ", current_dir, ": ", e$message)
       })
     }
 
-    # Update checkpoint every checkpoint_interval directories (and at end)
-    dirs_scanned <- c(dirs_scanned, current_dir)
+    # Only add to dirs_scanned if the write succeeded.  This prevents a failed
+    # write (e.g. network drive temporarily unavailable) from permanently
+    # "consuming" a directory — on resume it will be retried.
+    if (write_ok) {
+      dirs_scanned <- c(dirs_scanned, current_dir)
+    }
+
+    # Save checkpoint every checkpoint_interval iterations (and at the end)
     if (i %% checkpoint_interval == 0L || i == length(dirs_to_scan)) {
       saveRDS(list(dirs_scanned = dirs_scanned), checkpoint_file)
     }
